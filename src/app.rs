@@ -1,0 +1,1653 @@
+//! App state, input handling, and rendering.
+
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{
+    Block, BorderType, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
+};
+use ratatui::Frame;
+
+use crate::collector::{ProcInfo, Session, Snapshot, GROWING_THRESHOLD_KB};
+use crate::theme::{
+    self, bar_cells, braille_grid, braille_line, ease_out_cubic, ramp, shade, Theme, AMBER, BASE,
+    BORDER, EMBER, MINT, MUTED, PANEL, SCRIM, SEL_BG, SELECT_MARK, TEXT, ZEBRA_A, ZEBRA_B,
+};
+
+/// Samples of RSS history kept per tty for the sparkline.
+const HISTORY_LEN: usize = 120;
+/// How many recent samples the GROWING flag looks back across.
+const GROWING_WINDOW: usize = 15;
+/// Height of the detail panel when fully expanded.
+const DETAIL_H: f64 = 16.0;
+/// Duration of the expand/collapse ease.
+const ANIM_MS: f64 = 150.0;
+/// Half-period of the GROWING pulse (500ms on, 500ms off == 1Hz).
+const PULSE_MS: u128 = 500;
+/// Width of the inline RSS bar in the table.
+const ROW_BAR_W: usize = 7;
+
+/// TUI application state.
+#[derive(Debug)]
+pub struct App {
+    /// Latest snapshot from the collector thread.
+    pub snapshot: Option<Snapshot>,
+    /// Selected row index in the session table (sessions then detached).
+    pub selected: usize,
+    /// Whether the detail view for the selected session is open.
+    pub detail_open: bool,
+    /// Whether the kill-confirmation overlay is open.
+    pub confirm_kill: bool,
+    /// Set to true to exit the event loop.
+    pub should_quit: bool,
+    /// Resolved palette (also carries the `--no-color` decision).
+    pub theme: Theme,
+    /// One-line status message shown in the footer.
+    pub status: Option<String>,
+    /// Ring buffer of total RSS (KB) per tty key, newest last.
+    history: HashMap<String, VecDeque<u64>>,
+    /// Ring buffer of machine-wide summed RSS, for the header sparkline.
+    total_history: VecDeque<u64>,
+    /// Key (tty) of the selected row, used to keep selection stable across
+    /// re-sorted snapshots.
+    selected_key: Option<String>,
+    table_state: TableState,
+    /// Screen y of the first data row of the table (set during draw).
+    table_first_data_y: u16,
+    /// Number of visible data rows in the table (set during draw).
+    table_data_height: u16,
+    /// Table area x range for mouse hit-testing (set during draw).
+    table_x: (u16, u16),
+    /// Table scroll offset at last draw.
+    table_offset: usize,
+    /// Rendered height of each table row — rows are 1 tall except the first
+    /// detached row, which carries the section rule above it.
+    row_heights: Vec<u16>,
+    /// Monotonic clock the pulse and the ease read from.
+    clock: Instant,
+    /// In-flight expand/collapse: (started, from_height, to_height).
+    anim: Option<(Instant, f64, f64)>,
+    /// Current (possibly mid-ease) detail panel height in rows.
+    detail_h: f64,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            selected: 0,
+            detail_open: false,
+            confirm_kill: false,
+            should_quit: false,
+            theme: Theme::default(),
+            status: None,
+            history: HashMap::new(),
+            total_history: VecDeque::new(),
+            selected_key: None,
+            table_state: TableState::default(),
+            table_first_data_y: 0,
+            table_data_height: 0,
+            table_x: (0, 0),
+            table_offset: 0,
+            row_heights: Vec::new(),
+            clock: Instant::now(),
+            anim: None,
+            detail_h: 0.0,
+        }
+    }
+}
+
+impl App {
+    pub fn new(no_color: bool) -> Self {
+        Self { theme: Theme::detect(no_color), ..Self::default() }
+    }
+
+    // ---------------------------------------------------------------- data
+
+    pub fn on_snapshot(&mut self, mut snap: Snapshot) {
+        // Update per-tty RSS history and (re)derive delta/growing from it —
+        // the collector is stateless per call, so the UI owns the history.
+        let mut seen: Vec<String> = Vec::new();
+        for sess in snap.sessions.iter_mut().chain(snap.detached.iter_mut()) {
+            let hist = self.history.entry(sess.tty.clone()).or_default();
+            if let Some(&prev) = hist.back() {
+                sess.delta_rss_kb = sess.total_rss_kb as i64 - prev as i64;
+            } else {
+                sess.delta_rss_kb = 0;
+            }
+            let lookback = hist.iter().rev().take(GROWING_WINDOW).min().copied();
+            if let Some(base) = lookback {
+                sess.growing = sess.total_rss_kb >= base + GROWING_THRESHOLD_KB;
+            }
+            hist.push_back(sess.total_rss_kb);
+            while hist.len() > HISTORY_LEN {
+                hist.pop_front();
+            }
+            seen.push(sess.tty.clone());
+        }
+        self.history.retain(|k, _| seen.iter().any(|s| s == k));
+        self.total_history.push_back(snap.total_rss_kb);
+        while self.total_history.len() > HISTORY_LEN {
+            self.total_history.pop_front();
+        }
+        self.snapshot = Some(snap);
+        self.resolve_selection();
+    }
+
+    /// Selectable rows: sessions first, then detached pseudo-sessions.
+    fn item_count(&self) -> usize {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.sessions.len() + s.detached.len())
+            .unwrap_or(0)
+    }
+
+    fn item(&self, idx: usize) -> Option<&Session> {
+        let snap = self.snapshot.as_ref()?;
+        if idx < snap.sessions.len() {
+            snap.sessions.get(idx)
+        } else {
+            snap.detached.get(idx - snap.sessions.len())
+        }
+    }
+
+    fn selected_session(&self) -> Option<&Session> {
+        self.item(self.selected)
+    }
+
+    /// Re-find the previously selected tty after rows re-sorted; clamp otherwise.
+    fn resolve_selection(&mut self) {
+        let count = self.item_count();
+        if count == 0 {
+            self.selected = 0;
+            self.set_detail(false);
+            self.confirm_kill = false;
+            return;
+        }
+        if let Some(key) = self.selected_key.clone() {
+            for i in 0..count {
+                if self.item(i).map(|s| s.tty == key).unwrap_or(false) {
+                    self.selected = i;
+                    return;
+                }
+            }
+            // The session under the cursor vanished; selection is about to
+            // move to a DIFFERENT session, so a pending kill confirmation
+            // must not carry over to it.
+            if self.confirm_kill {
+                self.confirm_kill = false;
+                self.status = Some(format!("kill cancelled: session {key} is gone"));
+            }
+        }
+        if self.selected >= count {
+            self.selected = count - 1;
+        }
+        self.selected_key = self.item(self.selected).map(|s| s.tty.clone());
+    }
+
+    fn set_selected(&mut self, idx: usize) {
+        let count = self.item_count();
+        if count == 0 {
+            return;
+        }
+        self.selected = idx.min(count - 1);
+        self.selected_key = self.item(self.selected).map(|s| s.tty.clone());
+    }
+
+    fn move_selection(&mut self, delta: i64) {
+        let count = self.item_count();
+        if count == 0 {
+            return;
+        }
+        let cur = self.selected as i64;
+        let next = (cur + delta).clamp(0, count as i64 - 1) as usize;
+        self.set_selected(next);
+    }
+
+    // --------------------------------------------------------------- motion
+
+    /// Open/close the detail panel, easing the split rather than snapping it.
+    fn set_detail(&mut self, open: bool) {
+        if self.detail_open == open {
+            return;
+        }
+        self.detail_open = open;
+        let to = if open { DETAIL_H } else { 0.0 };
+        self.anim = Some((Instant::now(), self.detail_h, to));
+    }
+
+    /// Advance the animation clock. Call once per event-loop iteration.
+    pub fn tick(&mut self) {
+        if let Some((start, from, to)) = self.anim {
+            let t = start.elapsed().as_secs_f64() * 1000.0 / ANIM_MS;
+            if t >= 1.0 {
+                self.detail_h = to;
+                self.anim = None;
+            } else {
+                self.detail_h = from + (to - from) * ease_out_cubic(t);
+            }
+        }
+    }
+
+    /// Jump any in-flight animation to its end state (used by `--demo-frame`).
+    pub fn settle(&mut self) {
+        self.anim = None;
+        self.detail_h = if self.detail_open { DETAIL_H } else { 0.0 };
+    }
+
+    /// True while something on screen needs ~30fps: an easing panel, or a
+    /// GROWING row whose flag is pulsing.
+    pub fn needs_fast_tick(&self) -> bool {
+        if self.anim.is_some() {
+            return true;
+        }
+        self.snapshot
+            .as_ref()
+            .map(|s| s.sessions.iter().chain(s.detached.iter()).any(|x| x.growing))
+            .unwrap_or(false)
+    }
+
+    /// Bright half of the 1Hz GROWING pulse.
+    fn pulse_bright(&self) -> bool {
+        (self.clock.elapsed().as_millis() / PULSE_MS) % 2 == 0
+    }
+
+    // --------------------------------------------------------------- input
+
+    pub fn handle_key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        // Ctrl-C always quits.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+        if self.confirm_kill {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm_kill = false;
+                    self.kill_selected();
+                }
+                _ => {
+                    self.confirm_kill = false;
+                    self.status = Some("kill cancelled".to_string());
+                }
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Enter => {
+                if self.selected_session().is_some() {
+                    let open = !self.detail_open;
+                    self.set_detail(open);
+                }
+            }
+            KeyCode::Esc => self.set_detail(false),
+            KeyCode::Char('K') => {
+                if self.selected_session().is_some() {
+                    self.confirm_kill = true;
+                    self.status = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Map a screen y to a table row index, honouring variable row heights.
+    fn row_at(&self, y: u16) -> Option<usize> {
+        let mut top = self.table_first_data_y;
+        let end = self.table_first_data_y + self.table_data_height;
+        let mut idx = self.table_offset;
+        while idx < self.row_heights.len() && top < end {
+            let h = self.row_heights[idx].max(1);
+            if y >= top && y < top + h {
+                return Some(idx);
+            }
+            top += h;
+            idx += 1;
+        }
+        None
+    }
+
+    pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        if self.confirm_kill {
+            return; // overlay is keyboard-only
+        }
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.move_selection(-1),
+            MouseEventKind::ScrollDown => self.move_selection(1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let (x0, x1) = self.table_x;
+                if ev.column < x0 || ev.column >= x1 {
+                    return;
+                }
+                let row = match self.row_at(ev.row) {
+                    Some(r) if r < self.item_count() => r,
+                    _ => return,
+                };
+                if row == self.selected && self.detail_open {
+                    self.set_detail(false); // click again collapses
+                } else {
+                    self.set_selected(row);
+                    self.set_detail(true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---------------------------------------------------------------- kill
+
+    /// Send SIGTERM to every distinct process group of the selected session.
+    fn kill_selected(&mut self) {
+        let pgids: Vec<i32> = match self.selected_session() {
+            Some(s) => s.pgids.iter().copied().filter(|&g| g > 1).collect(),
+            None => return,
+        };
+        if pgids.is_empty() {
+            self.status = Some("no killable process groups".to_string());
+            return;
+        }
+        let mut ok = 0usize;
+        let mut errs: Vec<String> = Vec::new();
+        for pgid in &pgids {
+            // Negative pid == the whole process group.
+            let rc = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+            if rc == 0 {
+                ok += 1;
+            } else {
+                errs.push(format!("pgid {}: {}", pgid, std::io::Error::last_os_error()));
+            }
+        }
+        self.status = Some(if errs.is_empty() {
+            format!("SIGTERM sent to {} process group(s)", ok)
+        } else {
+            format!("SIGTERM to {} group(s); errors: {}", ok, errs.join("; "))
+        });
+    }
+
+    // --------------------------------------------------------------- draw
+
+    pub fn draw(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let th = self.theme;
+        if !th.plain() {
+            frame
+                .buffer_mut()
+                .set_style(area, Style::default().bg(th.color(BASE)).fg(th.color(TEXT)));
+        }
+
+        let emu_count = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.emulators.len().min(6))
+            .unwrap_or(0);
+        let emu_h = if emu_count > 0 { emu_count as u16 + 1 } else { 0 };
+        let detail_h = self.detail_h.round().max(0.0) as u16;
+
+        let chunks = Layout::vertical([
+            Constraint::Length(3),        // hero header
+            Constraint::Min(5),           // table
+            Constraint::Length(detail_h), // detail
+            Constraint::Length(emu_h),    // emulators
+            Constraint::Length(1),        // footer
+        ])
+        .split(area);
+
+        self.draw_header(frame, chunks[0]);
+        self.draw_table(frame, chunks[1]);
+        if detail_h >= 4 {
+            self.draw_detail(frame, chunks[2]);
+        }
+        if emu_h > 0 {
+            self.draw_emulators(frame, chunks[3]);
+        }
+        self.draw_footer(frame, chunks[4]);
+        if self.confirm_kill {
+            self.draw_kill_overlay(frame, area);
+        }
+    }
+
+    /// Magnitude of a session's RSS relative to the biggest one on screen.
+    fn rss_frac(&self, kb: u64) -> f64 {
+        let max = self
+            .snapshot
+            .as_ref()
+            .map(|s| {
+                s.sessions
+                    .iter()
+                    .chain(s.detached.iter())
+                    .map(|x| x.total_rss_kb)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        if max == 0 {
+            0.0
+        } else {
+            kb as f64 / max as f64
+        }
+    }
+
+    /// Gradient-colored inline bar, `width` cells wide.
+    fn mini_bar(&self, frac: f64, width: usize) -> Vec<Span<'static>> {
+        let th = self.theme;
+        bar_cells(frac, width)
+            .into_iter()
+            .map(|(ch, pos)| Span::styled(ch.to_string(), th.fg(ramp(pos))))
+            .collect()
+    }
+
+    // ------------------------------------------------------------- header
+
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        if area.height < 3 || area.width == 0 {
+            return;
+        }
+        let th = self.theme;
+        let (title_line, frac, label, hist): (Line, f64, String, Vec<u64>) = match &self.snapshot {
+            Some(snap) => {
+                let phys_kb = (snap.phys_mem_bytes / 1024).max(1);
+                let frac = snap.total_rss_kb as f64 / phys_kb as f64;
+                let label = format!(
+                    "{} / {} \u{b7} {} sessions \u{b7} {} procs",
+                    human_kb(snap.total_rss_kb),
+                    human_kb(phys_kb),
+                    snap.sessions.len(),
+                    snap.proc_count,
+                );
+                let note = snap.tab_title_hint.clone().unwrap_or_else(|| {
+                    "summed RSS double-counts shared pages, so it can exceed physical RAM"
+                        .to_string()
+                });
+                let line = Line::from(vec![
+                    Span::styled("topterm", th.bold(MINT)),
+                    Span::styled("  \u{2502}  ", th.fg(BORDER)),
+                    Span::styled(note, th.dim()),
+                ]);
+                (line, frac, label, self.total_history.iter().copied().collect())
+            }
+            None => (
+                Line::from(vec![
+                    Span::styled("topterm", th.bold(MINT)),
+                    Span::styled("  \u{2502}  ", th.fg(BORDER)),
+                    Span::styled("waiting for first sample\u{2026}", th.dim()),
+                ]),
+                0.0,
+                String::new(),
+                Vec::new(),
+            ),
+        };
+
+        frame.render_widget(
+            Paragraph::new(title_line),
+            Rect { height: 1, ..area },
+        );
+
+        let w = area.width as usize;
+        let buf = frame.buffer_mut();
+
+        // Row 2: the pressure gauge. Each cell takes its color from its own
+        // position along the bar, so the fill reads as one smooth ramp.
+        let cells = bar_cells(frac, w);
+        let lchars: Vec<char> = label.chars().collect();
+        let lx = w.saturating_sub(lchars.len()) / 2;
+        let y = area.y + 1;
+        for (i, (ch, pos)) in cells.iter().enumerate() {
+            let x = area.x + i as u16;
+            let col = ramp(*pos);
+            let filled = *ch != ' ';
+            match lchars.get(i.wrapping_sub(lx)).filter(|_| i >= lx) {
+                Some(&lc) => {
+                    let base = if filled { th.on(BASE, col) } else { th.on(TEXT, PANEL) };
+                    put(buf, x, y, lc, th.modifier(base, Modifier::BOLD));
+                }
+                None => put(buf, x, y, *ch, th.on(col, PANEL)),
+            }
+        }
+
+        // Row 3: machine-wide RSS history as a braille sparkline.
+        let y = area.y + 2;
+        for (i, (ch, mag)) in braille_line(&hist, w).into_iter().enumerate() {
+            put(buf, area.x + i as u16, y, ch, th.fg(shade(ramp(mag), 0.45)));
+        }
+    }
+
+    // -------------------------------------------------------------- table
+
+    fn draw_table(&mut self, frame: &mut Frame, area: Rect) {
+        let th = self.theme;
+        let pulse = self.pulse_bright();
+        let mut rows: Vec<Row> = Vec::new();
+        let mut heights: Vec<u16> = Vec::new();
+        let mut boundary: Option<usize> = None;
+
+        let fracs: Vec<f64> = {
+            let mut v = Vec::new();
+            if let Some(snap) = &self.snapshot {
+                for s in snap.sessions.iter().chain(snap.detached.iter()) {
+                    v.push(self.rss_frac(s.total_rss_kb));
+                }
+            }
+            v
+        };
+
+        if let Some(snap) = &self.snapshot {
+            let first_detached = snap.sessions.len();
+            for (i, sess) in snap.sessions.iter().chain(snap.detached.iter()).enumerate() {
+                let detached = i >= first_detached;
+                if detached && boundary.is_none() {
+                    boundary = Some(i);
+                }
+                // Left unclipped: the Fill-weighted columns get the real width
+                // and ratatui clips to whatever is actually available.
+                let mut label = norm_cmd(&sess.shell_name);
+                if let Some(rec) = &sess.recent_command {
+                    label.push_str(" / ");
+                    label.push_str(&norm_cmd(rec));
+                }
+                let tab = snap.tab_titles.get(&sess.tty).cloned().unwrap_or_else(|| "-".into());
+
+                let frac = fracs.get(i).copied().unwrap_or(0.0);
+                let mut rss_spans = vec![
+                    Span::styled(format!("{:>9}", human_kb(sess.total_rss_kb)), th.fg(ramp(frac))),
+                    Span::raw(" "),
+                ];
+                rss_spans.extend(self.mini_bar(frac, ROW_BAR_W));
+
+                let flag = if sess.growing {
+                    let c = if pulse { AMBER } else { shade(AMBER, 0.55) };
+                    Line::from(Span::styled("GROWING", th.modifier(th.fg(c), Modifier::BOLD)))
+                } else if detached {
+                    Line::from(Span::styled("DETACHED", th.dim()))
+                } else {
+                    Line::from("")
+                };
+
+                let lines: Vec<Line> = vec![
+                    Line::from(Span::styled(sess.tty.clone(), th.fg(TEXT))),
+                    Line::from(rss_spans),
+                    Line::from(Span::styled(fmt_delta(sess.delta_rss_kb), self.delta_style(sess.delta_rss_kb))),
+                    Line::from(format!("{:.1}", sess.total_cpu_pct)),
+                    Line::from(Span::styled(format!("{}", sess.proc_count), th.dim())),
+                    Line::from(tab),
+                    Line::from(label),
+                    Line::from(Span::styled(sess.cwd.clone(), th.dim())),
+                    flag,
+                ];
+                // The first detached row is two rows tall; its blank top line
+                // is where the section rule gets painted after the table
+                // renders, so the rule scrolls with the row.
+                let tall = boundary == Some(i);
+                let cells: Vec<Cell> = if tall {
+                    lines
+                        .into_iter()
+                        .map(|l| Cell::from(Text::from(vec![Line::from(""), l])))
+                        .collect()
+                } else {
+                    lines.into_iter().map(Cell::from).collect()
+                };
+                let h = if tall { 2 } else { 1 };
+                heights.push(h);
+                let zebra = if i % 2 == 0 { ZEBRA_A } else { ZEBRA_B };
+                rows.push(Row::new(cells).height(h).style(if th.plain() {
+                    Style::default()
+                } else {
+                    Style::default().bg(th.color(zebra)).fg(th.color(TEXT))
+                }));
+            }
+        }
+
+        // Numeric columns are fixed; everything left over is split between the
+        // three text columns rather than capped at a narrow constant.
+        let widths = [
+            Constraint::Length(10),
+            Constraint::Length(9 + 1 + ROW_BAR_W as u16),
+            Constraint::Length(9),
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Fill(3),
+            Constraint::Fill(3),
+            Constraint::Fill(4),
+            Constraint::Length(8),
+        ];
+        let header = Row::new(vec![
+            "TTY", "RSS", "\u{394}RSS", "%CPU", "PROCS", "TAB", "SHELL/RECENT", "CWD", "",
+        ])
+        .style(th.modifier(th.on(MUTED, PANEL), Modifier::BOLD));
+
+        let block = Block::bordered()
+            .border_type(if th.plain() { BorderType::Plain } else { BorderType::Rounded })
+            .border_style(th.fg(BORDER))
+            .title(inset_title("sessions", th, MINT));
+
+        let sel_style = if th.plain() {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().bg(th.color(SEL_BG)).add_modifier(Modifier::BOLD)
+        };
+        let table = Table::new(rows, widths)
+            .header(header)
+            .block(block)
+            .row_highlight_style(sel_style)
+            .highlight_symbol(Span::styled(SELECT_MARK, th.fg(MINT)))
+            .highlight_spacing(HighlightSpacing::Always);
+
+        if self.item_count() > 0 {
+            self.table_state.select(Some(self.selected));
+        } else {
+            self.table_state.select(None);
+        }
+        frame.render_stateful_widget(table, area, &mut self.table_state);
+
+        // Remember geometry for mouse hit-testing: border(1) + header(1).
+        self.table_first_data_y = area.y + 2;
+        self.table_data_height = area.height.saturating_sub(3);
+        self.table_x = (area.x, area.x + area.width);
+        self.table_offset = self.table_state.offset();
+        self.row_heights = heights;
+
+        if let Some(b) = boundary {
+            if let Some(y) = self.row_y(b) {
+                let x = area.x + 1;
+                let w = area.width.saturating_sub(2);
+                draw_rule(frame.buffer_mut(), x, y, w, "detached", th);
+            }
+        }
+    }
+
+    /// Screen y of the top line of table row `idx`, if it is on screen.
+    fn row_y(&self, idx: usize) -> Option<u16> {
+        if idx < self.table_offset {
+            return None;
+        }
+        let end = self.table_first_data_y + self.table_data_height;
+        let mut y = self.table_first_data_y;
+        for i in self.table_offset..idx {
+            y += self.row_heights.get(i).copied().unwrap_or(1);
+        }
+        if y < end {
+            Some(y)
+        } else {
+            None
+        }
+    }
+
+    fn delta_style(&self, kb: i64) -> Style {
+        let th = self.theme;
+        if kb < 0 {
+            th.fg(MINT)
+        } else if kb >= GROWING_THRESHOLD_KB as i64 {
+            th.modifier(th.fg(EMBER), Modifier::BOLD)
+        } else if kb > 0 {
+            th.fg(AMBER)
+        } else {
+            th.dim()
+        }
+    }
+
+    // ------------------------------------------------------------- detail
+
+    fn draw_detail(&self, frame: &mut Frame, area: Rect) {
+        let sess = match self.selected_session() {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let th = self.theme;
+        let tab = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.tab_titles.get(&sess.tty))
+            .cloned()
+            .map(|t| truncate_chars(&t, 40))
+            .unwrap_or_else(|| sess.tty.clone());
+        let block = Block::bordered()
+            .border_type(if th.plain() { BorderType::Plain } else { BorderType::Rounded })
+            .border_style(th.fg(BORDER))
+            .title(inset_title(&tab, th, MINT))
+            .title(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "\u{2574}{} \u{b7} {} \u{b7} {} procs \u{b7} {}\u{2576}",
+                        sess.tty,
+                        human_kb(sess.total_rss_kb),
+                        sess.proc_count,
+                        sess.cwd
+                    ),
+                    th.dim(),
+                ),
+            ])
+            .right_aligned());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height < 2 || inner.width == 0 {
+            return;
+        }
+
+        let chart_h = 6u16.min(inner.height.saturating_sub(2));
+        let parts =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(chart_h)]).split(inner);
+
+        // --- process tree
+        let max_proc_rss = sess.procs.iter().map(|p| p.rss_kb).max().unwrap_or(0);
+        let prefixes = tree_prefixes(&sess.depths);
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+            format!("{:>7} {:>7} {:>10} {:>ROW_BAR_W$} {:>6}  COMMAND", "PID", "PGID", "RSS", "", "%CPU"),
+            th.modifier(th.dim(), Modifier::BOLD),
+        ))];
+        for (i, p) in sess.procs.iter().enumerate() {
+            let frac = if max_proc_rss == 0 { 0.0 } else { p.rss_kb as f64 / max_proc_rss as f64 };
+            let mut spans = vec![
+                Span::styled(format!("{:>7}", p.pid), th.dim()),
+                Span::styled(format!(" {:>7}", p.pgid), th.dim()),
+                Span::styled(format!(" {:>10} ", human_kb(p.rss_kb)), th.fg(ramp(frac))),
+            ];
+            spans.extend(self.mini_bar(frac, ROW_BAR_W));
+            spans.push(Span::styled(format!(" {:>6.1}  ", p.cpu_pct), th.fg(TEXT)));
+            spans.push(Span::styled(
+                prefixes.get(i).cloned().unwrap_or_default(),
+                th.fg(BORDER),
+            ));
+            spans.push(Span::styled(p.command.clone(), th.fg(TEXT)));
+            lines.push(Line::from(spans));
+        }
+        // Wrapped, not truncated: the full command line is the point of this view.
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), parts[0]);
+
+        // --- braille RSS history chart
+        let data: Vec<u64> = self
+            .history
+            .get(&sess.tty)
+            .map(|h| h.iter().copied().collect())
+            .unwrap_or_default();
+        let carea = parts[1];
+        if carea.height == 0 || carea.width == 0 {
+            return;
+        }
+        let rows = carea.height.saturating_sub(1) as usize;
+        let grid = braille_grid(&data, carea.width as usize, rows);
+        let buf = frame.buffer_mut();
+        for (r, row) in grid.iter().enumerate() {
+            for (c, (ch, mag)) in row.iter().enumerate() {
+                put(
+                    buf,
+                    carea.x + c as u16,
+                    carea.y + r as u16,
+                    *ch,
+                    th.fg(ramp(*mag)),
+                );
+            }
+        }
+        let lo = data.iter().copied().min().unwrap_or(0);
+        let hi = data.iter().copied().max().unwrap_or(0);
+        let now = data.last().copied().unwrap_or(0);
+        let annot = Line::from(vec![
+            Span::styled(format!("{} samples", data.len()), th.dim()),
+            Span::styled("   min ", th.dim()),
+            Span::styled(human_kb(lo), th.fg(MINT)),
+            Span::styled("   max ", th.dim()),
+            Span::styled(human_kb(hi), th.fg(EMBER)),
+            Span::styled("   now ", th.dim()),
+            Span::styled(human_kb(now), th.fg(TEXT)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(annot),
+            Rect { y: carea.y + rows as u16, height: 1, ..carea },
+        );
+    }
+
+    // ---------------------------------------------------------- emulators
+
+    fn draw_emulators(&self, frame: &mut Frame, area: Rect) {
+        let snap = match &self.snapshot {
+            Some(s) => s,
+            None => return,
+        };
+        let th = self.theme;
+        let mut emus: Vec<&ProcInfo> = snap.emulators.iter().collect();
+        emus.sort_by(|a, b| b.rss_kb.cmp(&a.rss_kb));
+        let max = emus.first().map(|p| p.rss_kb).unwrap_or(0);
+        let mut lines: Vec<Line> = Vec::new();
+        for p in emus.iter().take(6) {
+            let frac = if max == 0 { 0.0 } else { p.rss_kb as f64 / max as f64 };
+            let mut spans = vec![
+                Span::styled(format!("  {:<20}", short_cmd(&p.command, 20)), th.fg(TEXT)),
+                Span::styled(format!("{:>10} ", human_kb(p.rss_kb)), th.fg(ramp(frac))),
+            ];
+            spans.extend(self.mini_bar(frac, ROW_BAR_W));
+            spans.push(Span::styled(format!(" {:>6.1}", p.cpu_pct), th.fg(TEXT)));
+            spans.push(Span::styled(format!("   pid {}", p.pid), th.dim()));
+            lines.push(Line::from(spans));
+        }
+        frame.render_widget(Paragraph::new(lines), Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area });
+        draw_rule(frame.buffer_mut(), area.x, area.y, area.width, "emulators", th);
+    }
+
+    // ------------------------------------------------------------- footer
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+        let th = self.theme;
+        let chip = |key: &str, label: &str| -> Vec<Span<'static>> {
+            vec![
+                Span::styled(
+                    format!(" {key} {label} "),
+                    if th.plain() {
+                        Style::default()
+                    } else {
+                        Style::default().fg(th.color(BASE)).bg(th.color(MUTED))
+                    },
+                ),
+                Span::styled(" ", th.dim()),
+            ]
+        };
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(chip("\u{21b5}", "expand"));
+        spans.extend(chip("esc", "collapse"));
+        spans.extend(chip("j/k", "move"));
+        spans.extend(chip("click", "select"));
+        spans.extend(chip("K", "kill"));
+        spans.extend(chip("q", "quit"));
+        if let Some(msg) = &self.status {
+            spans.push(Span::styled(format!(" {msg}"), th.fg(AMBER)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    // -------------------------------------------------------- kill overlay
+
+    fn draw_kill_overlay(&self, frame: &mut Frame, area: Rect) {
+        let sess = match self.selected_session() {
+            Some(s) => s,
+            None => return,
+        };
+        let th = self.theme;
+        let pgids: Vec<i32> = sess.pgids.iter().copied().filter(|&g| g > 1).collect();
+
+        // Darken everything behind the modal.
+        if !th.plain() {
+            let scrim = th.color(SCRIM);
+            let ghost = th.color(shade(MUTED, 0.6));
+            let buf = frame.buffer_mut();
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    if let Some(c) = buf.cell_mut((x, y)) {
+                        c.set_bg(scrim);
+                        c.set_fg(ghost);
+                        c.modifier = Modifier::empty();
+                    }
+                }
+            }
+        }
+
+        let h = (pgids.len() as u16 + 7).min(area.height);
+        let popup = centered_rect(area, 60, h);
+        frame.render_widget(Clear, popup);
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("SIGTERM ", th.modifier(th.fg(EMBER), Modifier::BOLD)),
+                Span::styled(sess.tty.clone(), th.modifier(th.fg(TEXT), Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled(short_cmd(&sess.shell_name, 20), th.fg(TEXT)),
+                Span::styled(
+                    format!("  \u{b7} {} procs \u{b7} {}", sess.proc_count, human_kb(sess.total_rss_kb)),
+                    th.dim(),
+                ),
+            ]),
+            Line::from(""),
+        ];
+        for g in &pgids {
+            lines.push(Line::from(vec![
+                Span::styled("  pgid ", th.dim()),
+                Span::styled(format!("{:<8}", g), th.fg(AMBER)),
+                Span::styled("whole group signalled", th.dim()),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                " y ",
+                if th.plain() {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(th.color(BASE)).bg(th.color(EMBER)).add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::styled(" confirm", th.fg(TEXT)),
+            Span::styled("   any other key cancels", th.dim()),
+        ]));
+
+        let para = Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(if th.plain() { BorderType::Plain } else { BorderType::Double })
+                .border_style(th.fg(EMBER))
+                .title(inset_title("confirm kill", th, EMBER))
+                .style(if th.plain() { Style::default() } else { Style::default().bg(th.color(PANEL)) }),
+        );
+        frame.render_widget(para, popup);
+    }
+}
+
+// ------------------------------------------------------------ draw helpers
+
+fn put(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        cell.set_char(ch);
+        cell.set_style(style);
+    }
+}
+
+/// `──╴title╶────…` written straight into the buffer.
+fn draw_rule(buf: &mut Buffer, x: u16, y: u16, width: u16, title: &str, th: Theme) {
+    if width == 0 {
+        return;
+    }
+    let mut text = String::from("\u{2500}\u{2500}\u{2574}");
+    text.push_str(title);
+    text.push('\u{2576}');
+    let head = text.chars().count();
+    text.extend(std::iter::repeat('\u{2500}').take((width as usize).saturating_sub(head)));
+    for (i, ch) in text.chars().take(width as usize).enumerate() {
+        let style = if i >= 3 && i < 3 + title.chars().count() {
+            th.dim()
+        } else {
+            th.fg(BORDER)
+        };
+        put(buf, x + i as u16, y, ch, style);
+    }
+}
+
+/// Block title inset into the top border: `╴title╶`.
+fn inset_title(title: &str, th: Theme, color: theme::Rgb) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("\u{2574}", th.fg(BORDER)),
+        Span::styled(title.to_string(), th.modifier(th.fg(color), Modifier::BOLD)),
+        Span::styled("\u{2576}", th.fg(BORDER)),
+    ])
+}
+
+/// Box-drawing guides for a depth-annotated, parent-before-children list.
+fn tree_prefixes(depths: &[usize]) -> Vec<String> {
+    let n = depths.len();
+    let mut last = vec![true; n];
+    for i in 0..n {
+        for j in i + 1..n {
+            if depths[j] < depths[i] {
+                break;
+            }
+            if depths[j] == depths[i] {
+                last[i] = false;
+                break;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    // stack[k] == "the ancestor at depth k still has siblings below".
+    let mut stack: Vec<bool> = Vec::new();
+    for i in 0..n {
+        let d = depths[i];
+        stack.truncate(d);
+        let mut p = String::new();
+        // Depth 0 has no connector column, so trunks start at depth 1.
+        for k in 1..d {
+            p.push_str(if stack.get(k) == Some(&true) { "\u{2502}  " } else { "   " });
+        }
+        if d > 0 {
+            p.push_str(if last[i] { "\u{2514}\u{2500} " } else { "\u{251c}\u{2500} " });
+        }
+        stack.push(!last[i]);
+        out.push(p);
+    }
+    out
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+// -------------------------------------------------------- buffer -> ANSI
+
+fn sgr_color(c: Color, fg: bool) -> String {
+    let base = if fg { 3 } else { 4 };
+    match c {
+        Color::Reset => format!("\x1b[{base}9m"),
+        Color::Rgb(r, g, b) => format!("\x1b[{base}8;2;{r};{g};{b}m"),
+        Color::Indexed(i) => format!("\x1b[{base}8;5;{i}m"),
+        Color::Black => format!("\x1b[{base}0m"),
+        Color::Red => format!("\x1b[{base}1m"),
+        Color::Green => format!("\x1b[{base}2m"),
+        Color::Yellow => format!("\x1b[{base}3m"),
+        Color::Blue => format!("\x1b[{base}4m"),
+        Color::Magenta => format!("\x1b[{base}5m"),
+        Color::Cyan => format!("\x1b[{base}6m"),
+        Color::Gray => format!("\x1b[{base}7m"),
+        _ => format!("\x1b[{base}9m"),
+    }
+}
+
+/// Serialize a rendered buffer to ANSI text — the `--demo-frame` path, and the
+/// only way the styled TUI can be asserted on outside a real terminal.
+pub fn buffer_to_ansi(buf: &Buffer) -> String {
+    let mut out = String::new();
+    for y in buf.area.top()..buf.area.bottom() {
+        let mut cur: Option<(Color, Color, Modifier)> = None;
+        for x in buf.area.left()..buf.area.right() {
+            let cell = match buf.cell((x, y)) {
+                Some(c) => c,
+                None => continue,
+            };
+            let sym = cell.symbol();
+            if sym.is_empty() {
+                continue; // continuation cell of a wide glyph
+            }
+            let key = (cell.fg, cell.bg, cell.modifier);
+            if cur != Some(key) {
+                out.push_str("\x1b[0m");
+                out.push_str(&sgr_color(cell.fg, true));
+                out.push_str(&sgr_color(cell.bg, false));
+                if cell.modifier.contains(Modifier::BOLD) {
+                    out.push_str("\x1b[1m");
+                }
+                if cell.modifier.contains(Modifier::DIM) {
+                    out.push_str("\x1b[2m");
+                }
+                if cell.modifier.contains(Modifier::REVERSED) {
+                    out.push_str("\x1b[7m");
+                }
+                cur = Some(key);
+            }
+            out.push_str(sym);
+        }
+        out.push_str("\x1b[0m\n");
+    }
+    out
+}
+
+// ------------------------------------------------------------------ helpers
+
+/// "512 MB" / "2.31 GB" from KB.
+pub fn human_kb(kb: u64) -> String {
+    let mb = kb as f64 / 1024.0;
+    if mb >= 1024.0 {
+        format!("{:.2} GB", mb / 1024.0)
+    } else {
+        format!("{:.0} MB", mb)
+    }
+}
+
+fn fmt_delta(kb: i64) -> String {
+    if kb == 0 {
+        "0 MB".to_string()
+    } else {
+        format!("{:+.0} MB", kb as f64 / 1024.0)
+    }
+}
+
+/// Basename of the executable + args, with nothing truncated.
+pub fn norm_cmd(cmd: &str) -> String {
+    short_cmd(cmd, usize::MAX)
+}
+
+/// Basename of the executable + args, truncated to `width` chars.
+pub fn short_cmd(cmd: &str, width: usize) -> String {
+    let mut parts = cmd.split_whitespace();
+    let exe = match parts.next() {
+        Some(p) => p.trim_start_matches('-').rsplit('/').next().unwrap_or(p),
+        None => return String::new(),
+    };
+    let rest: Vec<&str> = parts.collect();
+    let s = if rest.is_empty() {
+        exe.to_string()
+    } else {
+        format!("{} {}", exe, rest.join(" "))
+    };
+    truncate_chars(&s, width)
+}
+
+/// Break `s` into chunks of at most `width` chars, preferring a space boundary
+/// but hard-splitting tokens longer than the line. Always returns >= 1 chunk.
+fn wrap_chars(s: &str, width: usize) -> Vec<String> {
+    if width == usize::MAX || s.chars().count() <= width {
+        return vec![s.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    for word in s.split_whitespace() {
+        let wl = word.chars().count();
+        if cur_len > 0 && cur_len + 1 + wl > width {
+            out.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+        if wl > width {
+            // Token longer than a whole line: hard-split it.
+            for ch in word.chars() {
+                if cur_len == width {
+                    out.push(std::mem::take(&mut cur));
+                    cur_len = 0;
+                }
+                cur.push(ch);
+                cur_len += 1;
+            }
+            continue;
+        }
+        if cur_len > 0 {
+            cur.push(' ');
+            cur_len += 1;
+        }
+        cur.push_str(word);
+        cur_len += wl;
+    }
+    out.push(cur);
+    out
+}
+
+fn truncate_chars(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(width.saturating_sub(1)).collect();
+    format!("{}\u{2026}", cut)
+}
+
+// -------------------------------------------------------------- once output
+
+const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
+const DIM: &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
+
+/// Usable output width: $COLUMNS (so piped output honours the caller), then the
+/// real terminal size, then a sane default.
+pub fn output_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&w| w >= 40)
+        .or_else(|| crossterm::terminal::size().ok().map(|(w, _)| w as usize))
+        .filter(|&w| w >= 40)
+        .unwrap_or(120)
+}
+
+/// Truncate to `width` unless `wide`, in which case long lines just overflow.
+fn clip(s: &str, width: usize, wide: bool) -> String {
+    if wide {
+        s.to_string()
+    } else {
+        truncate_chars(s, width)
+    }
+}
+
+/// Plain-text one-shot report for `--once` (no TUI). `wide` disables all
+/// truncation; otherwise every column past the fixed numeric ones is sized
+/// from the real terminal width.
+pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
+    let (b, r, d) = if color { (BOLD, RESET, DIM) } else { ("", "", "") };
+    let width = output_width();
+    // 10 tty + 10 rss + 9 delta + 6 cpu + 5 procs, one space between each.
+    let fixed = 10 + 10 + 9 + 6 + 5 + 5;
+    let rest = (width.saturating_sub(fixed + 2)).max(48);
+    let tab_w = (rest * 34 / 100).clamp(14, 48);
+    let lbl_w = (rest * 30 / 100).clamp(18, 44);
+    let cwd_w = rest.saturating_sub(tab_w + lbl_w).max(12);
+    let color_for = |kb: u64| -> &'static str {
+        if !color {
+            ""
+        } else if kb > 2 * 1024 * 1024 {
+            RED
+        } else if kb > 1024 * 1024 {
+            YELLOW
+        } else {
+            ""
+        }
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "{}topterm{}  {} terminal sessions, {} processes  |  summed RSS {} of {} physical",
+        b,
+        r,
+        snap.sessions.len(),
+        snap.proc_count,
+        human_kb(snap.total_rss_kb),
+        human_kb(snap.phys_mem_bytes / 1024),
+    ));
+    lines.push(format!(
+        "{}summed RSS double-counts shared pages, so it can exceed physical RAM{}",
+        d, r
+    ));
+    if let Some(hint) = &snap.tab_title_hint {
+        lines.push(format!("{}{}{}", d, hint, r));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "{}{:<10} {:>10} {:>9} {:>6} {:>5} {:<tw$} {:<lw$} {}{}",
+        b,
+        "TTY",
+        "RSS",
+        "\u{394}RSS",
+        "%CPU",
+        "PROCS",
+        "TAB",
+        "SHELL/RECENT",
+        "CWD",
+        r,
+        tw = tab_w,
+        lw = lbl_w
+    ));
+    for sess in &snap.sessions {
+        let mut label = norm_cmd(&sess.shell_name);
+        if let Some(rec) = &sess.recent_command {
+            label.push_str(" / ");
+            label.push_str(&norm_cmd(rec));
+        }
+        let tab = snap.tab_titles.get(&sess.tty).map(String::as_str).unwrap_or("-");
+        let c = color_for(sess.total_rss_kb);
+        let flag = if sess.growing { "   \u{2190} GROWING" } else { "" };
+        lines.push(format!(
+            "{}{:<10} {:>10} {:>9} {:>6.1} {:>5} {:<tw$} {:<lw$} {}{}{}",
+            c,
+            sess.tty,
+            human_kb(sess.total_rss_kb),
+            fmt_delta(sess.delta_rss_kb),
+            sess.total_cpu_pct,
+            sess.proc_count,
+            clip(tab, tab_w, wide),
+            clip(&label, lbl_w, wide),
+            clip(&sess.cwd, cwd_w, wide),
+            flag,
+            if c.is_empty() { "" } else { r },
+            tw = tab_w,
+            lw = lbl_w,
+        ));
+    }
+
+    if !snap.emulators.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "{}terminal emulator apps (scrollback buffers){}",
+            b, r
+        ));
+        let mut emus: Vec<&ProcInfo> = snap.emulators.iter().collect();
+        emus.sort_by(|a, bb| bb.rss_kb.cmp(&a.rss_kb));
+        for p in emus {
+            let c = color_for(p.rss_kb);
+            lines.push(format!(
+                "{}{:<20} {:>10} {:>6.1}  pid {}  (app itself, not a tab){}",
+                c,
+                short_cmd(&p.command, 20),
+                human_kb(p.rss_kb),
+                p.cpu_pct,
+                p.pid,
+                if c.is_empty() { "" } else { r },
+            ));
+        }
+    }
+
+    if !snap.detached.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "{}detached (reparented to launchd - no tab to blame, kill by pid){}",
+            b, r
+        ));
+        // pid + full command line is the only identity these rows have, so the
+        // command is never clipped — it wraps underneath itself instead.
+        // Matches the head format below: 4 columns, 3 single spaces, 2 trailing.
+        let indent = 10 + 10 + 6 + 5 + 3 + 2;
+        for sess in &snap.detached {
+            let head = format!(
+                "{:<10} {:>10} {:>6.1} {:>5}  ",
+                sess.tty,
+                human_kb(sess.total_rss_kb),
+                sess.total_cpu_pct,
+                sess.proc_count,
+            );
+            let cmd = sess.procs.first().map(|p| p.command.as_str()).unwrap_or("");
+            let avail = width.saturating_sub(indent).max(30);
+            let mut chunks = wrap_chars(cmd, if wide { usize::MAX } else { avail });
+            lines.push(format!("{}{}", head, chunks.remove(0)));
+            for cont in chunks {
+                lines.push(format!("{}{}{}{}", d, " ".repeat(indent), cont, r));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Render exactly one styled TUI frame off-screen. Used by `--demo-frame` and
+/// by the render tests, so the visuals stay assertable without a real tty.
+pub fn render_frame(app: &mut App, width: u16, height: u16) -> Buffer {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut term = Terminal::new(TestBackend::new(width, height))
+        .expect("TestBackend terminal cannot fail");
+    app.settle();
+    // The buffer handed back by `draw` is the one that was just painted;
+    // the terminal's "current" buffer has already been swapped by then.
+    term.draw(|f| app.draw(f)).expect("TestBackend draw cannot fail").buffer.clone()
+}
+
+/// Poll timeout for the event loop: ~30fps while anything is moving,
+/// otherwise the (capped) sampling interval.
+pub fn poll_timeout(app: &App, interval: Duration) -> Duration {
+    if app.needs_fast_tick() {
+        Duration::from_millis(33)
+    } else {
+        interval.min(Duration::from_millis(100))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_kb_units() {
+        assert_eq!(human_kb(512 * 1024), "512 MB");
+        assert_eq!(human_kb(2 * 1024 * 1024 + 317 * 1024), "2.31 GB");
+        assert_eq!(human_kb(0), "0 MB");
+    }
+
+    #[test]
+    fn short_cmd_basename_and_truncate() {
+        assert_eq!(short_cmd("/bin/zsh", 20), "zsh");
+        assert_eq!(short_cmd("-zsh", 20), "zsh");
+        assert_eq!(
+            short_cmd("/usr/local/bin/node server.js --port 3000", 15),
+            "node server.js\u{2026}"
+        );
+    }
+
+    fn sess(tty: &str) -> Session {
+        Session {
+            tty: tty.to_string(),
+            shell_pid: 1000,
+            shell_name: "zsh".to_string(),
+            recent_command: None,
+            cwd: "?".to_string(),
+            total_rss_kb: 1024,
+            delta_rss_kb: 0,
+            total_cpu_pct: 0.0,
+            proc_count: 1,
+            pgids: vec![1000],
+            procs: vec![],
+            depths: vec![],
+            growing: false,
+        }
+    }
+
+    fn snap(ttys: &[&str]) -> Snapshot {
+        Snapshot {
+            sessions: ttys.iter().map(|t| sess(t)).collect(),
+            detached: vec![],
+            emulators: vec![],
+            total_rss_kb: 0,
+            phys_mem_bytes: 0,
+            proc_count: 0,
+            tab_titles: HashMap::new(),
+            tab_title_hint: None,
+            taken_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn kill_confirm_cancelled_when_selected_session_vanishes() {
+        let mut app = App::new(true);
+        app.on_snapshot(snap(&["ttys001", "ttys002"]));
+        app.set_selected(1); // ttys002
+        app.confirm_kill = true;
+        // ttys002 dies; selection must not silently move the pending kill
+        // onto a different session.
+        app.on_snapshot(snap(&["ttys001", "ttys003"]));
+        assert!(!app.confirm_kill);
+        assert!(app.status.as_deref().unwrap_or("").contains("ttys002"));
+        // But if the selected session survives a re-sort, confirm persists.
+        app.set_selected(0); // ttys001
+        app.confirm_kill = true;
+        app.on_snapshot(snap(&["ttys003", "ttys001"]));
+        assert!(app.confirm_kill);
+        assert_eq!(app.selected_session().unwrap().tty, "ttys001");
+    }
+
+    #[test]
+    fn fmt_delta_signs() {
+        assert_eq!(fmt_delta(0), "0 MB");
+        assert_eq!(fmt_delta(2048), "+2 MB");
+        assert_eq!(fmt_delta(-3072), "-3 MB");
+    }
+
+    #[test]
+    fn wrap_keeps_every_character() {
+        let cmd = "/usr/bin/node --inspect server.js --flag averyveryverylongtokenthatcannotfitonaline";
+        let chunks = wrap_chars(cmd, 20);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 20), "{chunks:?}");
+        // Nothing is dropped: rejoining on whitespace round-trips the tokens.
+        let rejoined: String = chunks.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(rejoined.replace(' ', ""), cmd.replace(' ', ""));
+        // Short input and --wide (usize::MAX) both stay on one line.
+        assert_eq!(wrap_chars("short", 20), vec!["short"]);
+        assert_eq!(wrap_chars(cmd, usize::MAX), vec![cmd]);
+    }
+
+    #[test]
+    fn norm_cmd_does_not_truncate() {
+        let long = "/usr/local/bin/node server.js --port 3000 --very --long --argument --list";
+        assert_eq!(
+            norm_cmd(long),
+            "node server.js --port 3000 --very --long --argument --list"
+        );
+    }
+
+    #[test]
+    fn tree_prefixes_draw_box_guides() {
+        // root, two children, one grandchild under the first child.
+        let p = tree_prefixes(&[0, 1, 2, 1]);
+        assert_eq!(p[0], "");
+        assert_eq!(p[1], "\u{251c}\u{2500} "); // has a sibling below
+        assert_eq!(p[2], "\u{2502}  \u{2514}\u{2500} "); // continues the parent's trunk
+        assert_eq!(p[3], "\u{2514}\u{2500} "); // last child
+        assert!(tree_prefixes(&[]).is_empty());
+    }
+
+    // ------------------------------------------------------------ rendering
+
+    fn rich_snapshot() -> Snapshot {
+        let proc = |pid: i32, rss: u64, cmd: &str| ProcInfo {
+            pid,
+            ppid: 1,
+            pgid: pid,
+            tty: Some("ttys001".into()),
+            rss_kb: rss,
+            cpu_pct: 1.5,
+            etime: "01:00".into(),
+            command: cmd.to_string(),
+        };
+        let mut a = sess("ttys001");
+        a.total_rss_kb = 3 * 1024 * 1024;
+        a.delta_rss_kb = 120 * 1024;
+        a.growing = true;
+        a.proc_count = 3;
+        a.procs = vec![
+            proc(1000, 40 * 1024, "-zsh"),
+            proc(1001, 900 * 1024, "node server.js"),
+            proc(1002, 200 * 1024, "esbuild"),
+        ];
+        a.depths = vec![0, 1, 2];
+        let mut b = sess("ttys002");
+        b.total_rss_kb = 400 * 1024;
+        b.delta_rss_kb = -8 * 1024;
+        let mut d = sess("pid:4242");
+        d.total_rss_kb = 700 * 1024;
+        d.procs = vec![proc(4242, 700 * 1024, "python -m http.server")];
+        d.depths = vec![0];
+        Snapshot {
+            sessions: vec![a, b],
+            detached: vec![d],
+            emulators: vec![proc(300, 1500 * 1024, "/Applications/iTerm.app/.../iTerm2")],
+            total_rss_kb: 12 * 1024 * 1024,
+            phys_mem_bytes: 18 * 1024 * 1024 * 1024,
+            proc_count: 812,
+            tab_titles: HashMap::from([("ttys001".to_string(), "claude".to_string())]),
+            tab_title_hint: None,
+            taken_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Every glyph on screen, as one string.
+    fn screen(buf: &Buffer) -> String {
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn styled_frame_draws_the_full_obsidian_ember_language() {
+        std::env::set_var("COLORTERM", "truecolor");
+        let mut app = App::new(false);
+        app.theme = Theme::detect(false);
+        // Two samples so the history sparklines have something to draw.
+        app.on_snapshot(rich_snapshot());
+        app.on_snapshot(rich_snapshot());
+        app.detail_open = true;
+        let buf = render_frame(&mut app, 140, 40);
+        let s = screen(&buf);
+
+        // Gauge + inline bars: eighth-block glyphs.
+        assert!(s.contains('\u{2588}'), "no full blocks in frame");
+        // Braille history (header sparkline and detail chart).
+        assert!(s.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "no braille dots");
+        // Rounded panel corners and the inset title brackets.
+        assert!(s.contains('\u{256d}') && s.contains('\u{2570}'), "borders are not rounded");
+        assert!(s.contains('\u{2574}') && s.contains('\u{2576}'), "no inset title brackets");
+        // Section rule for detached rows and the tree guides in the detail pane.
+        assert!(s.contains("detached"), "detached rule missing");
+        assert!(s.contains('\u{251c}') || s.contains('\u{2514}'), "no tree guides");
+        // Selection marker and footer chips.
+        assert!(s.contains(SELECT_MARK), "no selected-row marker");
+        assert!(s.contains("expand") && s.contains("quit"), "footer chips missing");
+        // No emojis anywhere.
+        assert!(
+            !s.chars().any(|c| c as u32 >= 0x1f300),
+            "frame contains an emoji"
+        );
+
+        // Truecolor made it into the ANSI serialization, including the ramp.
+        let ansi = buffer_to_ansi(&buf);
+        assert!(ansi.contains("\x1b[38;2;"), "no truecolor fg sequences");
+        assert!(ansi.contains("\x1b[48;2;"), "no truecolor bg sequences");
+        assert!(ansi.contains("38;2;45;212;167"), "mint gradient stop missing");
+        assert!(ansi.lines().count() >= 40);
+    }
+
+    #[test]
+    fn no_color_frame_is_unstyled() {
+        let mut app = App::new(true);
+        app.on_snapshot(rich_snapshot());
+        app.detail_open = true;
+        let buf = render_frame(&mut app, 120, 30);
+        // Nothing carries a color; the selected row falls back to reverse video.
+        assert!(
+            buf.content().iter().all(|c| c.fg == Color::Reset && c.bg == Color::Reset),
+            "--no-color frame has colored cells"
+        );
+        let ansi = buffer_to_ansi(&buf);
+        assert!(!ansi.contains("38;2;"), "--no-color frame emitted truecolor");
+    }
+
+    #[test]
+    fn expansion_eases_instead_of_snapping() {
+        let mut app = App::new(true);
+        app.on_snapshot(snap(&["ttys001"]));
+        assert_eq!(app.detail_h, 0.0);
+        assert!(!app.needs_fast_tick());
+
+        app.set_detail(true);
+        assert!(app.needs_fast_tick(), "animation must request the fast tick");
+        app.tick();
+        // Mid-flight: partially open, not yet at the target.
+        assert!(app.detail_h > 0.0 && app.detail_h < DETAIL_H, "{}", app.detail_h);
+        assert_eq!(poll_timeout(&app, Duration::from_secs(2)), Duration::from_millis(33));
+
+        app.settle();
+        assert_eq!(app.detail_h, DETAIL_H);
+        assert!(!app.needs_fast_tick());
+        assert_eq!(poll_timeout(&app, Duration::from_secs(2)), Duration::from_millis(100));
+
+        // A visible GROWING row keeps the pulse clock running.
+        app.on_snapshot(rich_snapshot());
+        app.on_snapshot(rich_snapshot());
+        assert!(app.needs_fast_tick(), "GROWING pulse must request the fast tick");
+    }
+
+    #[test]
+    fn kill_overlay_is_a_scrimmed_ember_modal() {
+        std::env::set_var("COLORTERM", "truecolor");
+        let mut app = App::new(false);
+        app.on_snapshot(rich_snapshot());
+        app.confirm_kill = true; // rendering only — no signal is sent
+        let buf = render_frame(&mut app, 120, 30);
+        let s = screen(&buf);
+        assert!(s.contains("SIGTERM") && s.contains("confirm kill"));
+        assert!(s.contains("pgid"), "pgid list missing");
+        // Double border in ember.
+        let ember = Color::Rgb(EMBER.0, EMBER.1, EMBER.2);
+        assert!(s.contains('\u{2554}') && s.contains('\u{255d}'), "modal is not double-bordered");
+        assert!(buf.content().iter().any(|c| c.fg == ember), "modal is not ember");
+        // The backdrop was repainted with the scrim, so the top-left corner of
+        // the screen is no longer the base background.
+        let scrim = Color::Rgb(SCRIM.0, SCRIM.1, SCRIM.2);
+        assert_eq!(buf.cell((0, 0)).unwrap().bg, scrim, "backdrop was not darkened");
+        // The confirm key is knocked out of an ember chip.
+        assert!(
+            buf.content().iter().any(|c| c.bg == ember),
+            "no inverse-ember confirm chip"
+        );
+    }
+
+    #[test]
+    fn mouse_click_maps_through_variable_row_heights() {
+        let mut app = App::new(true);
+        app.on_snapshot(rich_snapshot());
+        let _ = render_frame(&mut app, 140, 30);
+        // Row 2 is the first detached row and is 2 lines tall (it carries the
+        // section rule), so row 1 must still be reachable at its own line.
+        let click = |app: &mut App, y: u16| {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: app.table_x.0 + 2,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            });
+        };
+        let y0 = app.table_first_data_y;
+        click(&mut app, y0);
+        assert_eq!(app.selected, 0);
+        click(&mut app, y0 + 1);
+        assert_eq!(app.selected, 1);
+        // The 2-tall detached row occupies y0+2 and y0+3; both select it.
+        click(&mut app, y0 + 3);
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.selected_session().unwrap().tty, "pid:4242");
+        // Clicking the open row again collapses.
+        assert!(app.detail_open);
+        click(&mut app, y0 + 2);
+        assert!(!app.detail_open);
+    }
+}

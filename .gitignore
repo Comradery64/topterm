@@ -1,0 +1,6 @@
+/target
+.DS_Store
+
+# Scratch capture files from tools/capture_frame.py
+*.ans
+frame.ans

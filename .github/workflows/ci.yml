@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version && cargo --version
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      # Guards against personal paths or usernames from a contributor's machine
+      # reaching the repo. The needles are assembled from concatenated shell
+      # literals so that this file does not match its own pattern.
+      - name: Scrub gate
+        run: |
+          name_needle='al''an'
+          path_needle='/Vol''umes/SD'
+          pattern="\\b${name_needle}\\b|${path_needle}"
+          if grep -rliE "$pattern" . \
+               --exclude-dir=.git \
+               --exclude-dir=target; then
+            echo "::error::scrub gate: the files listed above contain a personal username or path"
+            exit 1
+          fi
+          echo "scrub gate clean"
