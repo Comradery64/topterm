@@ -1,0 +1,10 @@
+{
+  "name": "topterm-darwin-x64",
+  "version": "0.1.0",
+  "description": "topterm prebuilt binary for macOS x64 (Intel)",
+  "repository": "github:Comradery64/topterm",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/topterm"]
+}

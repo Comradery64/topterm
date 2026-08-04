@@ -4,3 +4,7 @@
 # Scratch capture files from tools/capture_frame.py
 *.ans
 frame.ans
+
+# Prebuilt binaries copied into npm platform packages at release time
+/npm/darwin-arm64/bin/topterm
+/npm/darwin-x64/bin/topterm
