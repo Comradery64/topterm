@@ -88,7 +88,6 @@ pub struct Snapshot {
     /// One-line explanation when tab titles could not be read (e.g. the
     /// Automation permission has not been granted).
     pub tab_title_hint: Option<String>,
-    pub taken_at: Instant,
 }
 
 /// Session RSS growth flag threshold (50 MB in KB).
@@ -238,30 +237,7 @@ pub fn collect() -> io::Result<Snapshot> {
         proc_count,
         tab_titles,
         tab_title_hint,
-        taken_at: Instant::now(),
     })
-}
-
-/// Fill `delta_rss_kb` and `growing` on `current` by comparing each
-/// session (and detached subtree, matched by tty / "pid:N" key) against
-/// `previous`. Sessions absent from `previous` keep 0/false.
-pub fn diff_snapshots(current: &mut Snapshot, previous: &Snapshot) {
-    let prev: HashMap<&str, u64> = previous
-        .sessions
-        .iter()
-        .chain(previous.detached.iter())
-        .map(|s| (s.tty.as_str(), s.total_rss_kb))
-        .collect();
-    for s in current
-        .sessions
-        .iter_mut()
-        .chain(current.detached.iter_mut())
-    {
-        if let Some(&p) = prev.get(s.tty.as_str()) {
-            s.delta_rss_kb = s.total_rss_kb as i64 - p as i64;
-            s.growing = s.delta_rss_kb >= GROWING_THRESHOLD_KB as i64;
-        }
-    }
 }
 
 /// Parse raw `ps -axo pid=,ppid=,pgid=,tty=,rss=,%cpu=,etime=,command=`
@@ -833,33 +809,6 @@ zsh      600 demo  txt    REG    1,4     1000 111111 /bin/zsh";
                 (600, "/Users/demo".to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn diff_snapshots_sets_delta_and_growing() {
-        let (sessions, detached, emulators) = group_sessions(parse_ps(PS));
-        let mk = |sessions: Vec<Session>, detached: Vec<Session>| Snapshot {
-            sessions,
-            detached,
-            emulators: emulators.clone(),
-            total_rss_kb: 0,
-            phys_mem_bytes: 0,
-            proc_count: 0,
-            tab_titles: HashMap::new(),
-            tab_title_hint: None,
-            taken_at: Instant::now(),
-        };
-        let prev = mk(sessions.clone(), detached.clone());
-        let mut cur = mk(sessions, detached);
-        cur.sessions[0].total_rss_kb += GROWING_THRESHOLD_KB; // grew 50 MB
-        cur.detached[0].total_rss_kb -= 1000;
-        diff_snapshots(&mut cur, &prev);
-        assert_eq!(cur.sessions[0].delta_rss_kb, GROWING_THRESHOLD_KB as i64);
-        assert!(cur.sessions[0].growing);
-        assert_eq!(cur.sessions[1].delta_rss_kb, 0);
-        assert!(!cur.sessions[1].growing);
-        assert_eq!(cur.detached[0].delta_rss_kb, -1000);
-        assert!(!cur.detached[0].growing);
     }
 
     #[test]

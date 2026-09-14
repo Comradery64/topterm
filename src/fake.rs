@@ -6,7 +6,6 @@
 //! out; `snapshot(step)` is a pure function of `step`.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use crate::collector::{ProcInfo, Session, Snapshot};
 
@@ -255,7 +254,6 @@ pub fn snapshot(step: usize) -> Snapshot {
             ("ttys012".to_string(), "vite dev server".to_string()),
         ]),
         tab_title_hint: None,
-        taken_at: Instant::now(),
     }
 }
 
