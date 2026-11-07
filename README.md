@@ -11,10 +11,10 @@
 And the one-shot plain table:
 
 ```
-topterm  5 terminal sessions, 641 processes  |  summed RSS 18.54 GB of 16.00 GB physical
-summed RSS double-counts shared pages, so it can exceed physical RAM
+topterm  5 terminal sessions, 641 processes  |  memory 18.54 GB of 16.00 GB physical
+memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM
 
-TTY               RSS      ΔRSS   %CPU PROCS TAB                    SHELL/RECENT        CWD
+TTY               MEM      ΔMEM   %CPU PROCS TAB                    SHELL/RECENT        CWD
 ttys004       6.21 GB   +227 MB  188.4     4 ml-training run 42     zsh / python train… /Users/demo/dev/vision-…   ← GROWING
 ttys001       1.38 GB     -3 MB   24.7     4 api-server (dev)       zsh / node server.… /Users/demo/dev/api-ser…
 ttys007        817 MB     -0 MB    9.3     3 docker compose up      zsh / docker compo… /Users/demo/dev/edgecast
@@ -60,9 +60,33 @@ Requires macOS and Rust. Three dependencies (`ratatui`, `crossterm`, `libc`) —
 ## Use
 
 ```sh
-topterm        # one-shot table, sorted by memory, pipe-friendly
-topterm -t     # the TUI
+topterm                          # one-shot table, sorted by memory, pipe-friendly
+topterm -t                       # the TUI
+topterm --index > tabs.md        # read-only map of every tab and its Claude session
+topterm --summarize > tabs.md    # same, plus a short recap per session
 ```
+
+### The tab index
+
+Too many tabs to close safely? `topterm --index` writes a markdown map you can
+keep, so closing a tab never means losing track of it. Per tab, in window/tab order:
+
+- the tab's title and working directory
+- the Claude Code session it holds: live sessions are read from
+  `~/.claude/sessions/<pid>.json`; exited ones from the `claude --resume <id>`
+  line Claude prints on exit (last 6,000 characters of scrollback)
+- cc-mirror variants
+  (`~/.cc-mirror/<name>/config`) are recognised, and their resume command uses
+  the variant's own launcher, e.g. `work --resume <id>`
+
+`--summarize` adds one or two sentences per session. Each recap is a one-off
+`claude -p --model haiku --effort low --no-session-persistence` call with tools
+and MCP disabled, fed a trimmed copy of the transcript. It never resumes the
+original session, adds nothing to it, and saves no new session. Recaps are
+cached in `~/Library/Caches/topterm/summaries` by session id and transcript
+size, so re-runs only pay for sessions that changed.
+
+Both modes only read. Nothing is closed, cleared, or signalled.
 
 ### The TUI
 
@@ -91,15 +115,19 @@ topterm -t     # the TUI
 | `--wide` | never truncate commands or paths |
 | `--no-color` | plain output |
 | `--demo-frame` | render one styled TUI frame as ANSI to stdout and exit (used by the test suite to assert on the visuals) |
+| `--index` | print a read-only markdown map of every Terminal.app tab (see above) |
+| `--summarize` | `--index` plus a Haiku recap per Claude session |
 | `--fake-data` | render a synthetic machine instead of sampling this one — how the screenshot and table above were generated |
 
 ## How it knows which tab is which
 
 Three tricks, all boring and reliable:
 
-1. **TTY grouping.** `ps -axo pid,ppid,pgid,tty,rss,%cpu` gives every process's controlling terminal. Processes that detached from their tty (`??`) get attributed by walking their ancestry back to a tab's shell — so a runaway child your dev server forked three levels deep still counts against the right tab.
+1. **TTY grouping.** `ps -axo pid,ppid,pgid,tty,%cpu` gives every process's controlling terminal. Processes that detached from their tty (`??`) get attributed by walking their ancestry back to a tab's shell — so a runaway child your dev server forked three levels deep still counts against the right tab.
 2. **Tab titles via AppleScript.** Terminal.app and iTerm2 both expose the tty of every tab, so one `osascript` call per refresh maps `ttys012` to the title you actually see. (First run may ask for Automation permission — approve once. Fun fact discovered building this: inside a `tell application "Terminal"` block, AppleScript's `tab` means the *tab object*, not the tab character.)
-3. **Working directories** via one batched `lsof -d cwd` call — many tabs lack titles, and the path is how you recognize them.
+3. **Working directories** via one batched `lsof -d cwd` call — many tabs lack titles, and the path is how you recognize them. A tab whose folder was deleted shows `(folder deleted)`.
+
+Memory is each process's **physical footprint** (`proc_pid_rusage`, the number Activity Monitor shows), not RSS. RSS only counts pages currently in RAM, so on a machine that is swapping it hides most of what a tab really holds. Processes you may not inspect fall back to RSS.
 
 Two categories fall outside per-tab grouping:
 
@@ -108,8 +136,11 @@ Two categories fall outside per-tab grouping:
 
 ## FAQ
 
-**Why does summed RSS exceed my physical RAM?**
-RSS double-counts memory pages shared between processes (frameworks, the dyld cache), and macOS compresses and swaps on top of that. The absolute number is an overestimate; the *ranking* is what you're here for, and the hog is always at the top.
+**Why does the memory total exceed my physical RAM?**
+Physical footprint includes memory macOS has compressed or swapped to disk. If the total is well above your RAM, you are swapping, which is exactly when a slow terminal starts to hang.
+
+**Why does the "out of application memory" dialog blame a tiny app for gigabytes?**
+macOS groups memory by responsible app. A program launched from a terminal tab, including one Claude Code starts by running its binary, is counted with Terminal, so the dialog can show Terminal's whole total next to it. Launch apps with `open MyApp.app` to give them their own row.
 
 **Does it only track dev tools?**
 No — grouping is completely tool-agnostic. Anything a tab runs gets counted: dev servers, docker, ssh, a stuck `npm install`. Only the detached-orphan section filters to dev-tool-looking commands, to keep macOS system daemons out of your face.
