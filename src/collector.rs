@@ -100,11 +100,13 @@ pub const DETACHED_MIN_RSS_KB: u64 = 50 * 1024;
 /// Timeout for the batched lsof call.
 const LSOF_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Timeout for one batched tab-title AppleScript call.
-const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Timeout for one batched tab-title AppleScript call. Terminal.app answers
+/// in ~3s with 100+ tabs on a machine under memory pressure, so 2s silently
+/// dropped every title.
+const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tab titles change rarely and osascript is slow, so reuse the last answer
 /// across samples for this long.
-const TAB_TITLE_TTL: Duration = Duration::from_secs(15);
+const TAB_TITLE_TTL: Duration = Duration::from_secs(60);
 
 /// Cached (taken_at, tty -> title, hint) from the last successful query.
 #[allow(clippy::type_complexity)]
@@ -464,6 +466,7 @@ fn cached_tab_titles(emulators: &[ProcInfo]) -> (HashMap<String, String>, Option
             cmd.args(["-e", line]);
         }
         let Some((stdout, stderr)) = run_with_timeout(cmd, OSASCRIPT_TIMEOUT) else {
+            hint = Some("tab titles unavailable: the emulator did not answer in time".to_string());
             continue;
         };
         if stderr.contains("-1743") {
