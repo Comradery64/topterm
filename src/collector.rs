@@ -484,12 +484,25 @@ fn cached_tab_titles(emulators: &[ProcInfo]) -> (HashMap<String, String>, Option
     (titles, hint)
 }
 
+/// Shown in place of a cwd whose directory was deleted after the shell cd'd into it.
+pub const DELETED_CWD: &str = "(folder deleted)";
+
 /// Parse `lsof -a -d cwd -p p1,p2,...` stdout into (pid, cwd) pairs. Pure.
 /// MUST be called on whatever stdout was produced even when lsof exited
 /// non-zero (some pids may be unreadable while others still resolved).
 pub fn parse_lsof_cwd(raw: &str) -> Vec<(i32, String)> {
     let mut out = Vec::new();
     for line in raw.lines() {
+        // A shell whose cwd was deleted yields no path, only
+        // "zsh 96110 demo cwd  cwd|rtd info error: No such file or directory".
+        if line.contains("info error") {
+            if let Some((f, _)) = split_fields(line, 4) {
+                if let (Ok(pid), "cwd") = (f[1].parse::<i32>(), f[3]) {
+                    out.push((pid, DELETED_CWD.to_string()));
+                }
+            }
+            continue;
+        }
         // COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
         let Some((f, name)) = split_fields(line, 8) else {
             continue;
@@ -827,13 +840,15 @@ garbage line without enough numeric fields
 COMMAND  PID USER   FD   TYPE DEVICE SIZE/OFF   NODE NAME
 zsh      401 demo  cwd    DIR    1,4      640 123456 /Users/demo/dev/my project
 zsh      600 demo  cwd    DIR    1,4      320 654321 /Users/demo
-zsh      600 demo  txt    REG    1,4     1000 111111 /bin/zsh";
+zsh      600 demo  txt    REG    1,4     1000 111111 /bin/zsh
+zsh      700 demo  cwd                             cwd|rtd info error: No such file or directory";
         let cwds = parse_lsof_cwd(raw);
         assert_eq!(
             cwds,
             vec![
                 (401, "/Users/demo/dev/my project".to_string()),
                 (600, "/Users/demo".to_string()),
+                (700, DELETED_CWD.to_string()),
             ]
         );
     }
