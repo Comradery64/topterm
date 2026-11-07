@@ -6,6 +6,7 @@
 mod app;
 mod collector;
 mod fake;
+mod index;
 mod theme;
 
 use std::io::{self, Write};
@@ -43,6 +44,10 @@ struct Args {
     /// README sample and the screenshot in assets/ can be regenerated from
     /// real output without publishing anyone's tab titles or paths.
     fake_data: bool,
+    /// Print a read-only markdown map of every Terminal.app tab (--index).
+    index: bool,
+    /// With --index, add a Haiku recap per Claude session (--summarize).
+    summarize: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -53,6 +58,8 @@ fn parse_args() -> Result<Args, String> {
         wide: false,
         demo_frame: false,
         fake_data: false,
+        index: false,
+        summarize: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -64,6 +71,11 @@ fn parse_args() -> Result<Args, String> {
             "--fake-data" => args.fake_data = true,
             "--no-color" => args.no_color = true,
             "--wide" => args.wide = true,
+            "--index" => args.index = true,
+            "--summarize" => {
+                args.index = true;
+                args.summarize = true;
+            }
             "--interval" => {
                 let v = it.next().ok_or("--interval requires a value")?;
                 args.interval_secs =
@@ -75,12 +87,17 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "topterm — Activity Monitor for terminal sessions\n\n\
-                     USAGE: topterm [-t|--tui] [--interval SECS] [--wide] [--no-color]\n\n\
+                     USAGE: topterm [-t|--tui] [--interval SECS] [--wide] [--no-color]\n\
+                            topterm --index [--summarize] > tabs.md\n\n\
                      With no flags, prints one plain-text snapshot and exits.\n\n\
                      -t, --tui        launch the interactive TUI instead\n\
                      --interval SECS  sampling interval, only used with --tui (default 2)\n\
                      --wide           print full command lines and cwds, never truncated\n\
-                     --no-color       disable all ANSI color/styling"
+                     --no-color       disable all ANSI color/styling\n\
+                     --index          markdown map of every Terminal.app tab: window/tab, title,\n\
+                     \x20                cwd, and its Claude session's resume command (read-only)\n\
+                     --summarize      --index plus a short recap per Claude session from Haiku\n\
+                     \x20                (low effort, reads a copy of the transcript, saves no session)"
                 );
                 std::process::exit(0);
             }
@@ -202,7 +219,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = if args.demo_frame {
+    let result = if args.index {
+        index::run(args.summarize)
+    } else if args.demo_frame {
         run_demo_frame(args.no_color, args.fake_data)
     } else if args.tui {
         run_tui(&args)

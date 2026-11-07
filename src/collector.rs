@@ -711,7 +711,7 @@ fn build_session(
 /// `(stdout, stderr)`. On timeout the spawned child (our own subprocess, never
 /// an arbitrary pid) is reaped and `None` is returned; the
 /// partial-output-on-nonzero-exit case still yields whatever was produced.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<(String, String)> {
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<(String, String)> {
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
