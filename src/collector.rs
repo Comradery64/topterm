@@ -23,8 +23,9 @@ pub struct ProcInfo {
     pub pgid: i32,
     /// Controlling terminal, e.g. "ttys003". `None` when ps reports "??".
     pub tty: Option<String>,
-    /// Resident set size in KB (as ps reports on macOS).
-    pub rss_kb: u64,
+    /// Memory in KB: physical footprint when readable (includes compressed
+    /// and swapped pages), else resident set size from ps.
+    pub mem_kb: u64,
     pub cpu_pct: f64,
     /// Elapsed time string from ps, e.g. "01:23" or "2-03:45:12".
     pub etime: String,
@@ -48,10 +49,10 @@ pub struct Session {
     pub recent_command: Option<String>,
     /// Shell's cwd from batched lsof; "?" when unavailable.
     pub cwd: String,
-    /// Sum of rss_kb over `procs` (double-counts shared pages).
-    pub total_rss_kb: u64,
-    /// Change in total_rss_kb vs the previous sample (0 on first sample).
-    pub delta_rss_kb: i64,
+    /// Sum of mem_kb over `procs` (double-counts shared pages).
+    pub total_mem_kb: u64,
+    /// Change in total_mem_kb vs the previous sample (0 on first sample).
+    pub delta_mem_kb: i64,
     pub total_cpu_pct: f64,
     pub proc_count: usize,
     /// Distinct process-group ids in this session (kill targets).
@@ -61,14 +62,14 @@ pub struct Session {
     pub procs: Vec<ProcInfo>,
     /// Parent-child depth for each entry of `procs` (session root = 0).
     pub depths: Vec<usize>,
-    /// True when total_rss_kb grew >= GROWING_THRESHOLD_KB across recent samples.
+    /// True when total_mem_kb grew >= GROWING_THRESHOLD_KB across recent samples.
     pub growing: bool,
 }
 
 /// One full sample of the system.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    /// Tty-owned sessions, sorted by total_rss_kb descending.
+    /// Tty-owned sessions, sorted by total_mem_kb descending.
     pub sessions: Vec<Session>,
     /// Dev-tool subtrees reparented to launchd (pid 1) with subtree RSS
     /// over DETACHED_MIN_RSS_KB — no tab owns them; keyed by root pid.
@@ -76,8 +77,8 @@ pub struct Snapshot {
     /// Terminal emulator app processes (Terminal.app, iTerm2, kitty,
     /// Alacritty, WezTerm, Ghostty), matched by command name.
     pub emulators: Vec<ProcInfo>,
-    /// Sum of rss_kb over all listed processes (double-counts shared pages).
-    pub total_rss_kb: u64,
+    /// Sum of mem_kb over all listed processes (double-counts shared pages).
+    pub total_mem_kb: u64,
     /// Physical memory from `sysctl -n hw.memsize`.
     pub phys_mem_bytes: u64,
     /// Total number of processes seen in the ps output.
@@ -193,9 +194,18 @@ pub fn collect() -> io::Result<Snapshot> {
         .args(["-axo", "pid=,ppid=,pgid=,tty=,rss=,%cpu=,etime=,command="])
         .stderr(Stdio::null())
         .output()?;
-    let procs = parse_ps(&String::from_utf8_lossy(&ps_out.stdout));
+    let mut procs = parse_ps(&String::from_utf8_lossy(&ps_out.stdout));
+    // RSS only counts pages currently in RAM; on a machine that is swapping
+    // it hides most of the real usage. Prefer the physical footprint
+    // (Activity Monitor's "Memory"), which includes compressed and swapped
+    // pages. Other users' processes refuse the call and keep their RSS.
+    for p in &mut procs {
+        if let Some(kb) = footprint_kb(p.pid) {
+            p.mem_kb = kb;
+        }
+    }
     let proc_count = procs.len();
-    let total_rss_kb: u64 = procs.iter().map(|p| p.rss_kb).sum();
+    let total_mem_kb: u64 = procs.iter().map(|p| p.mem_kb).sum();
 
     let (mut sessions, detached, emulators) = group_sessions(procs);
 
@@ -235,7 +245,7 @@ pub fn collect() -> io::Result<Snapshot> {
         sessions,
         detached,
         emulators,
-        total_rss_kb,
+        total_mem_kb,
         phys_mem_bytes,
         proc_count,
         tab_titles,
@@ -244,7 +254,7 @@ pub fn collect() -> io::Result<Snapshot> {
     })
 }
 
-/// Fill `delta_rss_kb` and `growing` on `current` by comparing each
+/// Fill `delta_mem_kb` and `growing` on `current` by comparing each
 /// session (and detached subtree, matched by tty / "pid:N" key) against
 /// `previous`. Sessions absent from `previous` keep 0/false.
 pub fn diff_snapshots(current: &mut Snapshot, previous: &Snapshot) {
@@ -252,7 +262,7 @@ pub fn diff_snapshots(current: &mut Snapshot, previous: &Snapshot) {
         .sessions
         .iter()
         .chain(previous.detached.iter())
-        .map(|s| (s.tty.as_str(), s.total_rss_kb))
+        .map(|s| (s.tty.as_str(), s.total_mem_kb))
         .collect();
     for s in current
         .sessions
@@ -260,8 +270,8 @@ pub fn diff_snapshots(current: &mut Snapshot, previous: &Snapshot) {
         .chain(current.detached.iter_mut())
     {
         if let Some(&p) = prev.get(s.tty.as_str()) {
-            s.delta_rss_kb = s.total_rss_kb as i64 - p as i64;
-            s.growing = s.delta_rss_kb >= GROWING_THRESHOLD_KB as i64;
+            s.delta_mem_kb = s.total_mem_kb as i64 - p as i64;
+            s.growing = s.delta_mem_kb >= GROWING_THRESHOLD_KB as i64;
         }
     }
 }
@@ -283,7 +293,7 @@ pub fn parse_ps(raw: &str) -> Vec<ProcInfo> {
         else {
             continue;
         };
-        let (Ok(rss_kb), Ok(cpu_pct)) = (f[4].parse::<u64>(), f[5].parse::<f64>()) else {
+        let (Ok(mem_kb), Ok(cpu_pct)) = (f[4].parse::<u64>(), f[5].parse::<f64>()) else {
             continue;
         };
         let tty = if f[3] == "??" {
@@ -296,7 +306,7 @@ pub fn parse_ps(raw: &str) -> Vec<ProcInfo> {
             ppid,
             pgid,
             tty,
-            rss_kb,
+            mem_kb,
             cpu_pct,
             etime: f[6].to_string(),
             command: command.to_string(),
@@ -313,11 +323,11 @@ pub fn parse_ps(raw: &str) -> Vec<ProcInfo> {
 /// - The session root is usually `login -pfl <user>`; the reported shell
 ///   is the interactive shell beneath it.
 /// - Returns `(sessions, detached, emulators)`:
-///   sessions sorted by total_rss_kb desc; detached = launchd-reparented
+///   sessions sorted by total_mem_kb desc; detached = launchd-reparented
 ///   dev-tool subtrees (claude/node/python/docker etc.) over
 ///   DETACHED_MIN_RSS_KB, as single-pgid pseudo-sessions keyed by pid;
 ///   emulators = terminal emulator app processes.
-/// - `cwd` is left as "?" and `delta_rss_kb`/`growing` as 0/false; the
+/// - `cwd` is left as "?" and `delta_mem_kb`/`growing` as 0/false; the
 ///   caller fills those from lsof and RSS history.
 pub fn group_sessions(procs: Vec<ProcInfo>) -> (Vec<Session>, Vec<Session>, Vec<ProcInfo>) {
     let idx: HashMap<i32, usize> = procs.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
@@ -366,7 +376,7 @@ pub fn group_sessions(procs: Vec<ProcInfo>) -> (Vec<Session>, Vec<Session>, Vec<
         .into_iter()
         .map(|(tty, members)| build_session(tty, &members, &procs, &children, &idx))
         .collect();
-    sessions.sort_by(|a, b| b.total_rss_kb.cmp(&a.total_rss_kb).then(a.tty.cmp(&b.tty)));
+    sessions.sort_by(|a, b| b.total_mem_kb.cmp(&a.total_mem_kb).then(a.tty.cmp(&b.tty)));
 
     // Detached: dev-tool subtrees reparented to launchd (pid 1) that no
     // session claims — the ancestry that would have tied them to a tab is gone.
@@ -391,7 +401,7 @@ pub fn group_sessions(procs: Vec<ProcInfo>) -> (Vec<Session>, Vec<Session>, Vec<
                 stack.extend(kids.iter().filter_map(|k| idx.get(k).copied()));
             }
         }
-        let rss: u64 = members.iter().map(|&m| procs[m].rss_kb).sum();
+        let rss: u64 = members.iter().map(|&m| procs[m].mem_kb).sum();
         if rss >= DETACHED_MIN_RSS_KB {
             detached.push(build_session(
                 format!("pid:{}", p.pid),
@@ -402,7 +412,7 @@ pub fn group_sessions(procs: Vec<ProcInfo>) -> (Vec<Session>, Vec<Session>, Vec<
             ));
         }
     }
-    detached.sort_by(|a, b| b.total_rss_kb.cmp(&a.total_rss_kb).then(a.tty.cmp(&b.tty)));
+    detached.sort_by(|a, b| b.total_mem_kb.cmp(&a.total_mem_kb).then(a.tty.cmp(&b.tty)));
 
     // Terminal emulator app processes not claimed by any session.
     let emulators: Vec<ProcInfo> = procs
@@ -519,6 +529,17 @@ pub fn parse_lsof_cwd(raw: &str) -> Vec<(i32, String)> {
 
 // ---------------------------------------------------------------------------
 // Private helpers (pure unless noted).
+
+/// Physical footprint of `pid` in KB via proc_pid_rusage; `None` when the
+/// kernel refuses (another user's process) or the pid is gone.
+fn footprint_kb(pid: i32) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: rusage_info_v2 is plain data and the kernel fills it for flavor V2.
+    let rc = unsafe {
+        libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, info.as_mut_ptr() as *mut libc::rusage_info_t)
+    };
+    (rc == 0).then(|| unsafe { info.assume_init() }.ri_phys_footprint / 1024)
+}
 
 /// Split off the first `n` whitespace-separated fields; return them plus the
 /// trimmed rest of the line. `None` if fewer than `n` fields exist.
@@ -659,7 +680,7 @@ fn build_session(
         .min_by_key(|&m| (etime_secs(&procs[m].etime), procs[m].pid))
         .map(|m| procs[m].command.clone());
 
-    let total_rss_kb: u64 = ordered.iter().map(|&m| procs[m].rss_kb).sum();
+    let total_mem_kb: u64 = ordered.iter().map(|&m| procs[m].mem_kb).sum();
     let total_cpu_pct: f64 = ordered.iter().map(|&m| procs[m].cpu_pct).sum();
     let mut pgids: Vec<i32> = ordered
         .iter()
@@ -675,8 +696,8 @@ fn build_session(
         shell_name,
         recent_command,
         cwd: "?".to_string(),
-        total_rss_kb,
-        delta_rss_kb: 0,
+        total_mem_kb,
+        delta_mem_kb: 0,
         total_cpu_pct,
         proc_count: ordered.len(),
         pgids,
@@ -768,7 +789,7 @@ garbage line without enough numeric fields
         assert_eq!(p401.ppid, 400);
         assert_eq!(p401.pgid, 401);
         assert_eq!(p401.tty.as_deref(), Some("ttys003"));
-        assert_eq!(p401.rss_kb, 9000);
+        assert_eq!(p401.mem_kb, 9000);
         assert!((p401.cpu_pct - 0.1).abs() < 1e-9);
         assert_eq!(p401.etime, "03:59:00");
         assert_eq!(p401.command, "-zsh");
@@ -791,12 +812,12 @@ garbage line without enough numeric fields
         let pids: Vec<i32> = s.procs.iter().map(|p| p.pid).collect();
         assert_eq!(pids, vec![400, 401, 402, 403]); // tree order
         assert_eq!(s.depths, vec![0, 1, 2, 3]);
-        assert_eq!(s.total_rss_kb, 8000 + 9000 + 120000 + 30000);
+        assert_eq!(s.total_mem_kb, 8000 + 9000 + 120000 + 30000);
         assert_eq!(s.proc_count, 4);
         assert_eq!(s.pgids, vec![400, 401, 402]);
         assert_eq!(s.recent_command.as_deref(), Some("node worker.js"));
         assert_eq!(s.cwd, "?");
-        assert_eq!(s.delta_rss_kb, 0);
+        assert_eq!(s.delta_mem_kb, 0);
         assert!(!s.growing);
     }
 
@@ -823,7 +844,7 @@ garbage line without enough numeric fields
         let d = &detached[0];
         assert_eq!(d.tty, "pid:500");
         assert_eq!(d.shell_pid, 500);
-        assert_eq!(d.total_rss_kb, 95000);
+        assert_eq!(d.total_mem_kb, 95000);
         assert_eq!(d.proc_count, 2);
         assert_eq!(d.pgids, vec![500]);
         assert_eq!(d.depths, vec![0, 1]);
@@ -860,7 +881,7 @@ zsh      700 demo  cwd                             cwd|rtd info error: No such f
             sessions,
             detached,
             emulators: emulators.clone(),
-            total_rss_kb: 0,
+            total_mem_kb: 0,
             phys_mem_bytes: 0,
             proc_count: 0,
             tab_titles: HashMap::new(),
@@ -869,14 +890,14 @@ zsh      700 demo  cwd                             cwd|rtd info error: No such f
         };
         let prev = mk(sessions.clone(), detached.clone());
         let mut cur = mk(sessions, detached);
-        cur.sessions[0].total_rss_kb += GROWING_THRESHOLD_KB; // grew 50 MB
-        cur.detached[0].total_rss_kb -= 1000;
+        cur.sessions[0].total_mem_kb += GROWING_THRESHOLD_KB; // grew 50 MB
+        cur.detached[0].total_mem_kb -= 1000;
         diff_snapshots(&mut cur, &prev);
-        assert_eq!(cur.sessions[0].delta_rss_kb, GROWING_THRESHOLD_KB as i64);
+        assert_eq!(cur.sessions[0].delta_mem_kb, GROWING_THRESHOLD_KB as i64);
         assert!(cur.sessions[0].growing);
-        assert_eq!(cur.sessions[1].delta_rss_kb, 0);
+        assert_eq!(cur.sessions[1].delta_mem_kb, 0);
         assert!(!cur.sessions[1].growing);
-        assert_eq!(cur.detached[0].delta_rss_kb, -1000);
+        assert_eq!(cur.detached[0].delta_mem_kb, -1000);
         assert!(!cur.detached[0].growing);
     }
 

@@ -116,22 +116,22 @@ impl App {
         for sess in snap.sessions.iter_mut().chain(snap.detached.iter_mut()) {
             let hist = self.history.entry(sess.tty.clone()).or_default();
             if let Some(&prev) = hist.back() {
-                sess.delta_rss_kb = sess.total_rss_kb as i64 - prev as i64;
+                sess.delta_mem_kb = sess.total_mem_kb as i64 - prev as i64;
             } else {
-                sess.delta_rss_kb = 0;
+                sess.delta_mem_kb = 0;
             }
             let lookback = hist.iter().rev().take(GROWING_WINDOW).min().copied();
             if let Some(base) = lookback {
-                sess.growing = sess.total_rss_kb >= base + GROWING_THRESHOLD_KB;
+                sess.growing = sess.total_mem_kb >= base + GROWING_THRESHOLD_KB;
             }
-            hist.push_back(sess.total_rss_kb);
+            hist.push_back(sess.total_mem_kb);
             while hist.len() > HISTORY_LEN {
                 hist.pop_front();
             }
             seen.push(sess.tty.clone());
         }
         self.history.retain(|k, _| seen.iter().any(|s| s == k));
-        self.total_history.push_back(snap.total_rss_kb);
+        self.total_history.push_back(snap.total_mem_kb);
         while self.total_history.len() > HISTORY_LEN {
             self.total_history.pop_front();
         }
@@ -418,7 +418,7 @@ impl App {
     }
 
     /// Magnitude of a session's RSS relative to the biggest one on screen.
-    fn rss_frac(&self, kb: u64) -> f64 {
+    fn mem_frac(&self, kb: u64) -> f64 {
         let max = self
             .snapshot
             .as_ref()
@@ -426,7 +426,7 @@ impl App {
                 s.sessions
                     .iter()
                     .chain(s.detached.iter())
-                    .map(|x| x.total_rss_kb)
+                    .map(|x| x.total_mem_kb)
                     .max()
                     .unwrap_or(0)
             })
@@ -457,16 +457,16 @@ impl App {
         let (title_line, frac, label, hist): (Line, f64, String, Vec<u64>) = match &self.snapshot {
             Some(snap) => {
                 let phys_kb = (snap.phys_mem_bytes / 1024).max(1);
-                let frac = snap.total_rss_kb as f64 / phys_kb as f64;
+                let frac = snap.total_mem_kb as f64 / phys_kb as f64;
                 let label = format!(
                     "{} / {} \u{b7} {} sessions \u{b7} {} procs",
-                    human_kb(snap.total_rss_kb),
+                    human_kb(snap.total_mem_kb),
                     human_kb(phys_kb),
                     snap.sessions.len(),
                     snap.proc_count,
                 );
                 let note = snap.tab_title_hint.clone().unwrap_or_else(|| {
-                    "summed RSS double-counts shared pages, so it can exceed physical RAM"
+                    "memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM"
                         .to_string()
                 });
                 let line = Line::from(vec![
@@ -535,7 +535,7 @@ impl App {
             let mut v = Vec::new();
             if let Some(snap) = &self.snapshot {
                 for s in snap.sessions.iter().chain(snap.detached.iter()) {
-                    v.push(self.rss_frac(s.total_rss_kb));
+                    v.push(self.mem_frac(s.total_mem_kb));
                 }
             }
             v
@@ -558,11 +558,11 @@ impl App {
                 let tab = snap.tab_titles.get(&sess.tty).cloned().unwrap_or_else(|| "-".into());
 
                 let frac = fracs.get(i).copied().unwrap_or(0.0);
-                let mut rss_spans = vec![
-                    Span::styled(format!("{:>9}", human_kb(sess.total_rss_kb)), th.fg(ramp(frac))),
+                let mut mem_spans = vec![
+                    Span::styled(format!("{:>9}", human_kb(sess.total_mem_kb)), th.fg(ramp(frac))),
                     Span::raw(" "),
                 ];
-                rss_spans.extend(self.mini_bar(frac, ROW_BAR_W));
+                mem_spans.extend(self.mini_bar(frac, ROW_BAR_W));
 
                 let flag = if sess.growing {
                     let c = if pulse { AMBER } else { shade(AMBER, 0.55) };
@@ -575,8 +575,8 @@ impl App {
 
                 let lines: Vec<Line> = vec![
                     Line::from(Span::styled(sess.tty.clone(), th.fg(TEXT))),
-                    Line::from(rss_spans),
-                    Line::from(Span::styled(fmt_delta(sess.delta_rss_kb), self.delta_style(sess.delta_rss_kb))),
+                    Line::from(mem_spans),
+                    Line::from(Span::styled(fmt_delta(sess.delta_mem_kb), self.delta_style(sess.delta_mem_kb))),
                     Line::from(format!("{:.1}", sess.total_cpu_pct)),
                     Line::from(Span::styled(format!("{}", sess.proc_count), th.dim())),
                     Line::from(tab),
@@ -621,7 +621,7 @@ impl App {
             Constraint::Length(8),
         ];
         let header = Row::new(vec![
-            "TTY", "RSS", "\u{394}RSS", "%CPU", "PROCS", "TAB", "SHELL/RECENT", "CWD", "",
+            "TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "TAB", "SHELL/RECENT", "CWD", "",
         ])
         .style(th.modifier(th.on(MUTED, PANEL), Modifier::BOLD));
 
@@ -719,7 +719,7 @@ impl App {
                     format!(
                         "\u{2574}{} \u{b7} {} \u{b7} {} procs \u{b7} {}\u{2576}",
                         sess.tty,
-                        human_kb(sess.total_rss_kb),
+                        human_kb(sess.total_mem_kb),
                         sess.proc_count,
                         sess.cwd
                     ),
@@ -738,18 +738,18 @@ impl App {
             Layout::vertical([Constraint::Min(1), Constraint::Length(chart_h)]).split(inner);
 
         // --- process tree
-        let max_proc_rss = sess.procs.iter().map(|p| p.rss_kb).max().unwrap_or(0);
+        let max_proc_mem = sess.procs.iter().map(|p| p.mem_kb).max().unwrap_or(0);
         let prefixes = tree_prefixes(&sess.depths);
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-            format!("{:>7} {:>7} {:>10} {:>ROW_BAR_W$} {:>6}  COMMAND", "PID", "PGID", "RSS", "", "%CPU"),
+            format!("{:>7} {:>7} {:>10} {:>ROW_BAR_W$} {:>6}  COMMAND", "PID", "PGID", "MEM", "", "%CPU"),
             th.modifier(th.dim(), Modifier::BOLD),
         ))];
         for (i, p) in sess.procs.iter().enumerate() {
-            let frac = if max_proc_rss == 0 { 0.0 } else { p.rss_kb as f64 / max_proc_rss as f64 };
+            let frac = if max_proc_mem == 0 { 0.0 } else { p.mem_kb as f64 / max_proc_mem as f64 };
             let mut spans = vec![
                 Span::styled(format!("{:>7}", p.pid), th.dim()),
                 Span::styled(format!(" {:>7}", p.pgid), th.dim()),
-                Span::styled(format!(" {:>10} ", human_kb(p.rss_kb)), th.fg(ramp(frac))),
+                Span::styled(format!(" {:>10} ", human_kb(p.mem_kb)), th.fg(ramp(frac))),
             ];
             spans.extend(self.mini_bar(frac, ROW_BAR_W));
             spans.push(Span::styled(format!(" {:>6.1}  ", p.cpu_pct), th.fg(TEXT)));
@@ -814,14 +814,14 @@ impl App {
         };
         let th = self.theme;
         let mut emus: Vec<&ProcInfo> = snap.emulators.iter().collect();
-        emus.sort_by(|a, b| b.rss_kb.cmp(&a.rss_kb));
-        let max = emus.first().map(|p| p.rss_kb).unwrap_or(0);
+        emus.sort_by(|a, b| b.mem_kb.cmp(&a.mem_kb));
+        let max = emus.first().map(|p| p.mem_kb).unwrap_or(0);
         let mut lines: Vec<Line> = Vec::new();
         for p in emus.iter().take(6) {
-            let frac = if max == 0 { 0.0 } else { p.rss_kb as f64 / max as f64 };
+            let frac = if max == 0 { 0.0 } else { p.mem_kb as f64 / max as f64 };
             let mut spans = vec![
                 Span::styled(format!("  {:<20}", short_cmd(&p.command, 20)), th.fg(TEXT)),
-                Span::styled(format!("{:>10} ", human_kb(p.rss_kb)), th.fg(ramp(frac))),
+                Span::styled(format!("{:>10} ", human_kb(p.mem_kb)), th.fg(ramp(frac))),
             ];
             spans.extend(self.mini_bar(frac, ROW_BAR_W));
             spans.push(Span::styled(format!(" {:>6.1}", p.cpu_pct), th.fg(TEXT)));
@@ -900,7 +900,7 @@ impl App {
             Line::from(vec![
                 Span::styled(short_cmd(&sess.shell_name, 20), th.fg(TEXT)),
                 Span::styled(
-                    format!("  \u{b7} {} procs \u{b7} {}", sess.proc_count, human_kb(sess.total_rss_kb)),
+                    format!("  \u{b7} {} procs \u{b7} {}", sess.proc_count, human_kb(sess.total_mem_kb)),
                     th.dim(),
                 ),
             ]),
@@ -1222,16 +1222,16 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
 
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
-        "{}topterm{}  {} terminal sessions, {} processes  |  summed RSS {} of {} physical",
+        "{}topterm{}  {} terminal sessions, {} processes  |  memory {} of {} physical",
         b,
         r,
         snap.sessions.len(),
         snap.proc_count,
-        human_kb(snap.total_rss_kb),
+        human_kb(snap.total_mem_kb),
         human_kb(snap.phys_mem_bytes / 1024),
     ));
     lines.push(format!(
-        "{}summed RSS double-counts shared pages, so it can exceed physical RAM{}",
+        "{}memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM{}",
         d, r
     ));
     if let Some(hint) = &snap.tab_title_hint {
@@ -1242,8 +1242,8 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
         "{}{:<10} {:>10} {:>9} {:>6} {:>5} {:<tw$} {:<lw$} {}{}",
         b,
         "TTY",
-        "RSS",
-        "\u{394}RSS",
+        "MEM",
+        "\u{394}MEM",
         "%CPU",
         "PROCS",
         "TAB",
@@ -1260,14 +1260,14 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
             label.push_str(&norm_cmd(rec));
         }
         let tab = snap.tab_titles.get(&sess.tty).map(String::as_str).unwrap_or("-");
-        let c = color_for(sess.total_rss_kb);
+        let c = color_for(sess.total_mem_kb);
         let flag = if sess.growing { "   \u{2190} GROWING" } else { "" };
         lines.push(format!(
             "{}{:<10} {:>10} {:>9} {:>6.1} {:>5} {:<tw$} {:<lw$} {}{}{}",
             c,
             sess.tty,
-            human_kb(sess.total_rss_kb),
-            fmt_delta(sess.delta_rss_kb),
+            human_kb(sess.total_mem_kb),
+            fmt_delta(sess.delta_mem_kb),
             sess.total_cpu_pct,
             sess.proc_count,
             clip(tab, tab_w, wide),
@@ -1287,14 +1287,14 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
             b, r
         ));
         let mut emus: Vec<&ProcInfo> = snap.emulators.iter().collect();
-        emus.sort_by(|a, bb| bb.rss_kb.cmp(&a.rss_kb));
+        emus.sort_by(|a, bb| bb.mem_kb.cmp(&a.mem_kb));
         for p in emus {
-            let c = color_for(p.rss_kb);
+            let c = color_for(p.mem_kb);
             lines.push(format!(
                 "{}{:<20} {:>10} {:>6.1}  pid {}  (app itself, not a tab){}",
                 c,
                 short_cmd(&p.command, 20),
-                human_kb(p.rss_kb),
+                human_kb(p.mem_kb),
                 p.cpu_pct,
                 p.pid,
                 if c.is_empty() { "" } else { r },
@@ -1316,7 +1316,7 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
             let head = format!(
                 "{:<10} {:>10} {:>6.1} {:>5}  ",
                 sess.tty,
-                human_kb(sess.total_rss_kb),
+                human_kb(sess.total_mem_kb),
                 sess.total_cpu_pct,
                 sess.proc_count,
             );
@@ -1384,8 +1384,8 @@ mod tests {
             shell_name: "zsh".to_string(),
             recent_command: None,
             cwd: "?".to_string(),
-            total_rss_kb: 1024,
-            delta_rss_kb: 0,
+            total_mem_kb: 1024,
+            delta_mem_kb: 0,
             total_cpu_pct: 0.0,
             proc_count: 1,
             pgids: vec![1000],
@@ -1400,7 +1400,7 @@ mod tests {
             sessions: ttys.iter().map(|t| sess(t)).collect(),
             detached: vec![],
             emulators: vec![],
-            total_rss_kb: 0,
+            total_mem_kb: 0,
             phys_mem_bytes: 0,
             proc_count: 0,
             tab_titles: HashMap::new(),
@@ -1476,14 +1476,14 @@ mod tests {
             ppid: 1,
             pgid: pid,
             tty: Some("ttys001".into()),
-            rss_kb: rss,
+            mem_kb: rss,
             cpu_pct: 1.5,
             etime: "01:00".into(),
             command: cmd.to_string(),
         };
         let mut a = sess("ttys001");
-        a.total_rss_kb = 3 * 1024 * 1024;
-        a.delta_rss_kb = 120 * 1024;
+        a.total_mem_kb = 3 * 1024 * 1024;
+        a.delta_mem_kb = 120 * 1024;
         a.growing = true;
         a.proc_count = 3;
         a.procs = vec![
@@ -1493,17 +1493,17 @@ mod tests {
         ];
         a.depths = vec![0, 1, 2];
         let mut b = sess("ttys002");
-        b.total_rss_kb = 400 * 1024;
-        b.delta_rss_kb = -8 * 1024;
+        b.total_mem_kb = 400 * 1024;
+        b.delta_mem_kb = -8 * 1024;
         let mut d = sess("pid:4242");
-        d.total_rss_kb = 700 * 1024;
+        d.total_mem_kb = 700 * 1024;
         d.procs = vec![proc(4242, 700 * 1024, "python -m http.server")];
         d.depths = vec![0];
         Snapshot {
             sessions: vec![a, b],
             detached: vec![d],
             emulators: vec![proc(300, 1500 * 1024, "/Applications/iTerm.app/.../iTerm2")],
-            total_rss_kb: 12 * 1024 * 1024,
+            total_mem_kb: 12 * 1024 * 1024,
             phys_mem_bytes: 18 * 1024 * 1024 * 1024,
             proc_count: 812,
             tab_titles: HashMap::from([("ttys001".to_string(), "claude".to_string())]),

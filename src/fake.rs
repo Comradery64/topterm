@@ -59,7 +59,7 @@ struct Proc<'a> {
     pid: i32,
     ppid: i32,
     depth: usize,
-    rss_kb: u64,
+    mem_kb: u64,
     cpu_pct: f64,
     etime: &'a str,
     command: &'a str,
@@ -71,16 +71,16 @@ fn session(
     shell_name: &str,
     recent: Option<&str>,
     cwd: &str,
-    base_rss_kb: u64,
+    base_mem_kb: u64,
     step: usize,
     curve: Curve,
     cpu: f64,
     procs: &[Proc<'_>],
 ) -> Session {
-    let (total_rss_kb, delta_rss_kb) = ramp(base_rss_kb, step, curve);
+    let (total_mem_kb, delta_mem_kb) = ramp(base_mem_kb, step, curve);
     // Scale the per-process RSS by the same factor so the tree adds up to the
     // session total the header row shows.
-    let scale = total_rss_kb as f64 / base_rss_kb.max(1) as f64;
+    let scale = total_mem_kb as f64 / base_mem_kb.max(1) as f64;
     let tty_field = if tty.starts_with("pid:") { None } else { Some(tty.to_string()) };
     let mut pgids: Vec<i32> = Vec::new();
     let mut out = Vec::with_capacity(procs.len());
@@ -94,7 +94,7 @@ fn session(
             ppid: p.ppid,
             pgid: if p.depth == 0 { p.pid } else { procs[0].pid },
             tty: tty_field.clone(),
-            rss_kb: (p.rss_kb as f64 * scale) as u64,
+            mem_kb: (p.mem_kb as f64 * scale) as u64,
             cpu_pct: p.cpu_pct,
             etime: p.etime.to_string(),
             command: p.command.to_string(),
@@ -107,8 +107,8 @@ fn session(
         shell_name: shell_name.to_string(),
         recent_command: recent.map(str::to_string),
         cwd: cwd.to_string(),
-        total_rss_kb,
-        delta_rss_kb,
+        total_mem_kb,
+        delta_mem_kb,
         total_cpu_pct: cpu,
         proc_count: procs.len(),
         pgids,
@@ -132,10 +132,10 @@ pub fn snapshot(step: usize) -> Snapshot {
             Curve::Leak,
             188.4,
             &[
-                Proc { pid: 24118, ppid: 24110, depth: 0, rss_kb: 44 * MB, cpu_pct: 0.0, etime: "04:12:07", command: "-zsh" },
-                Proc { pid: 24390, ppid: 24118, depth: 1, rss_kb: 4820 * MB, cpu_pct: 121.6, etime: "02:47:31", command: "python train.py --epochs 50 --batch-size 64 --checkpoint runs/042" },
-                Proc { pid: 24404, ppid: 24390, depth: 2, rss_kb: 748 * MB, cpu_pct: 33.9, etime: "02:47:29", command: "python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=7)" },
-                Proc { pid: 24405, ppid: 24390, depth: 2, rss_kb: 748 * MB, cpu_pct: 32.9, etime: "02:47:29", command: "python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=9)" },
+                Proc { pid: 24118, ppid: 24110, depth: 0, mem_kb: 44 * MB, cpu_pct: 0.0, etime: "04:12:07", command: "-zsh" },
+                Proc { pid: 24390, ppid: 24118, depth: 1, mem_kb: 4820 * MB, cpu_pct: 121.6, etime: "02:47:31", command: "python train.py --epochs 50 --batch-size 64 --checkpoint runs/042" },
+                Proc { pid: 24404, ppid: 24390, depth: 2, mem_kb: 748 * MB, cpu_pct: 33.9, etime: "02:47:29", command: "python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=7)" },
+                Proc { pid: 24405, ppid: 24390, depth: 2, mem_kb: 748 * MB, cpu_pct: 32.9, etime: "02:47:29", command: "python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=9)" },
             ],
         );
         s.growing = true;
@@ -152,10 +152,10 @@ pub fn snapshot(step: usize) -> Snapshot {
         Curve::Flat(0.0),
         24.7,
         &[
-            Proc { pid: 10432, ppid: 10428, depth: 0, rss_kb: 41 * MB, cpu_pct: 0.0, etime: "1-06:18:44", command: "-zsh" },
-            Proc { pid: 11907, ppid: 10432, depth: 1, rss_kb: 963 * MB, cpu_pct: 18.2, etime: "05:31:12", command: "node server.js --watch --port 8080" },
-            Proc { pid: 11930, ppid: 11907, depth: 2, rss_kb: 268 * MB, cpu_pct: 4.1, etime: "05:31:10", command: "node /Users/demo/dev/api-server/node_modules/.bin/tsc --watch --preserveWatchOutput" },
-            Proc { pid: 11944, ppid: 11907, depth: 2, rss_kb: 144 * MB, cpu_pct: 2.4, etime: "05:31:10", command: "esbuild --service=0.21.5 --ping" },
+            Proc { pid: 10432, ppid: 10428, depth: 0, mem_kb: 41 * MB, cpu_pct: 0.0, etime: "1-06:18:44", command: "-zsh" },
+            Proc { pid: 11907, ppid: 10432, depth: 1, mem_kb: 963 * MB, cpu_pct: 18.2, etime: "05:31:12", command: "node server.js --watch --port 8080" },
+            Proc { pid: 11930, ppid: 11907, depth: 2, mem_kb: 268 * MB, cpu_pct: 4.1, etime: "05:31:10", command: "node /Users/demo/dev/api-server/node_modules/.bin/tsc --watch --preserveWatchOutput" },
+            Proc { pid: 11944, ppid: 11907, depth: 2, mem_kb: 144 * MB, cpu_pct: 2.4, etime: "05:31:10", command: "esbuild --service=0.21.5 --ping" },
         ],
     );
 
@@ -169,9 +169,9 @@ pub fn snapshot(step: usize) -> Snapshot {
         Curve::Flat(1.7),
         9.3,
         &[
-            Proc { pid: 30211, ppid: 30205, depth: 0, rss_kb: 39 * MB, cpu_pct: 0.0, etime: "22:40:02", command: "-zsh" },
-            Proc { pid: 31877, ppid: 30211, depth: 1, rss_kb: 512 * MB, cpu_pct: 6.8, etime: "03:02:55", command: "docker compose up" },
-            Proc { pid: 31902, ppid: 31877, depth: 2, rss_kb: 271 * MB, cpu_pct: 2.5, etime: "03:02:54", command: "com.docker.backend --watchdog" },
+            Proc { pid: 30211, ppid: 30205, depth: 0, mem_kb: 39 * MB, cpu_pct: 0.0, etime: "22:40:02", command: "-zsh" },
+            Proc { pid: 31877, ppid: 30211, depth: 1, mem_kb: 512 * MB, cpu_pct: 6.8, etime: "03:02:55", command: "docker compose up" },
+            Proc { pid: 31902, ppid: 31877, depth: 2, mem_kb: 271 * MB, cpu_pct: 2.5, etime: "03:02:54", command: "com.docker.backend --watchdog" },
         ],
     );
 
@@ -185,8 +185,8 @@ pub fn snapshot(step: usize) -> Snapshot {
         Curve::Flat(3.1),
         5.1,
         &[
-            Proc { pid: 40190, ppid: 40186, depth: 0, rss_kb: 38 * MB, cpu_pct: 0.0, etime: "08:09:33", command: "-zsh" },
-            Proc { pid: 41562, ppid: 40190, depth: 1, rss_kb: 476 * MB, cpu_pct: 5.1, etime: "01:14:06", command: "node /Users/demo/dev/storefront/node_modules/.bin/vite --host" },
+            Proc { pid: 40190, ppid: 40186, depth: 0, mem_kb: 38 * MB, cpu_pct: 0.0, etime: "08:09:33", command: "-zsh" },
+            Proc { pid: 41562, ppid: 40190, depth: 1, mem_kb: 476 * MB, cpu_pct: 5.1, etime: "01:14:06", command: "node /Users/demo/dev/storefront/node_modules/.bin/vite --host" },
         ],
     );
 
@@ -201,8 +201,8 @@ pub fn snapshot(step: usize) -> Snapshot {
         Curve::Flat(4.4),
         0.2,
         &[
-            Proc { pid: 52007, ppid: 52001, depth: 0, rss_kb: 40 * MB, cpu_pct: 0.0, etime: "00:41:18", command: "-zsh" },
-            Proc { pid: 52344, ppid: 52007, depth: 1, rss_kb: 52 * MB, cpu_pct: 0.2, etime: "00:12:47", command: "ssh deploy@staging.example.internal" },
+            Proc { pid: 52007, ppid: 52001, depth: 0, mem_kb: 40 * MB, cpu_pct: 0.0, etime: "00:41:18", command: "-zsh" },
+            Proc { pid: 52344, ppid: 52007, depth: 1, mem_kb: 52 * MB, cpu_pct: 0.2, etime: "00:12:47", command: "ssh deploy@staging.example.internal" },
         ],
     );
 
@@ -219,7 +219,7 @@ pub fn snapshot(step: usize) -> Snapshot {
             pid: 6188,
             ppid: 1,
             depth: 0,
-            rss_kb: 648 * MB,
+            mem_kb: 648 * MB,
             cpu_pct: 3.6,
             etime: "2-11:26:40",
             command: "node /Users/demo/dev/storefront/node_modules/next/dist/server/next-server.js --port 3000",
@@ -231,7 +231,7 @@ pub fn snapshot(step: usize) -> Snapshot {
         ppid: 1,
         pgid: 812,
         tty: None,
-        rss_kb: at(1180 * MB, step, Curve::Flat(2.2)),
+        mem_kb: at(1180 * MB, step, Curve::Flat(2.2)),
         cpu_pct: 1.9,
         etime: "3-02:55:19".to_string(),
         command: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal".to_string(),
@@ -241,8 +241,8 @@ pub fn snapshot(step: usize) -> Snapshot {
     let detached = vec![orphan];
 
     Snapshot {
-        total_rss_kb: at(12_680 * MB, step, Curve::Flat(0.8))
-            + sessions.first().map(|s| s.total_rss_kb).unwrap_or(0),
+        total_mem_kb: at(12_680 * MB, step, Curve::Flat(0.8))
+            + sessions.first().map(|s| s.total_mem_kb).unwrap_or(0),
         sessions,
         detached,
         emulators: vec![emulator],
@@ -325,10 +325,10 @@ mod tests {
 
     #[test]
     fn leaking_session_climbs_across_the_timeline() {
-        let series: Vec<u64> = (0..STEPS).map(|s| snapshot(s).sessions[0].total_rss_kb).collect();
+        let series: Vec<u64> = (0..STEPS).map(|s| snapshot(s).sessions[0].total_mem_kb).collect();
         assert!(series.windows(2).all(|w| w[1] > w[0]), "{series:?}");
         // Sessions must stay sorted by RSS descending, like the collector emits.
         let last = snapshot(STEPS - 1);
-        assert!(last.sessions.windows(2).all(|w| w[0].total_rss_kb >= w[1].total_rss_kb));
+        assert!(last.sessions.windows(2).all(|w| w[0].total_mem_kb >= w[1].total_mem_kb));
     }
 }
