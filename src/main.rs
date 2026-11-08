@@ -6,6 +6,7 @@
 mod app;
 mod collector;
 mod fake;
+mod hibernate;
 mod claude;
 mod index;
 mod theme;
@@ -51,6 +52,9 @@ struct Args {
     summarize: bool,
     /// Measure per-tab Terminal.app scrollback (--scrollback; ~10s).
     scrollback: bool,
+    /// Render one TUI frame with the hibernate preview open for this tty and
+    /// exit (--demo-hibernate TTY). Undocumented; read-only, never hibernates.
+    demo_hibernate: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -64,6 +68,7 @@ fn parse_args() -> Result<Args, String> {
         index: false,
         summarize: false,
         scrollback: false,
+        demo_hibernate: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -77,6 +82,9 @@ fn parse_args() -> Result<Args, String> {
             "--wide" => args.wide = true,
             "--index" => args.index = true,
             "--scrollback" => args.scrollback = true,
+            "--demo-hibernate" => {
+                args.demo_hibernate = Some(it.next().ok_or("--demo-hibernate requires a tty")?);
+            }
             "--summarize" => {
                 args.index = true;
                 args.summarize = true;
@@ -158,6 +166,21 @@ fn run_demo_frame(no_color: bool, fake_data: bool) -> io::Result<()> {
     io::stdout().flush()
 }
 
+/// One frame with the hibernate preview open for `tty`. Only builds the
+/// read-only plan; nothing is executed.
+fn run_demo_hibernate(tty: &str) -> io::Result<()> {
+    let mut app = app::App::new(false);
+    app.on_snapshot(collector::collect()?);
+    if !app.select_tty(tty) {
+        return Err(io::Error::other(format!("no session on {tty}")));
+    }
+    app.open_hibernate_preview().map_err(io::Error::other)?;
+    let (w, h) = crossterm::terminal::size().unwrap_or((120, 44));
+    let buf = app::render_frame(&mut app, w.max(100), h.max(40));
+    print!("{}", app::buffer_to_ansi(&buf));
+    io::stdout().flush()
+}
+
 fn run_tui(args: &Args) -> io::Result<()> {
     // Sampler thread: never block the UI on ps/lsof. It exits when the
     // receiver (the UI loop) is dropped.
@@ -231,7 +254,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = if args.index {
+    let result = if let Some(tty) = &args.demo_hibernate {
+        run_demo_hibernate(tty)
+    } else if args.index {
         index::run(args.summarize)
     } else if args.demo_frame {
         run_demo_frame(args.no_color, args.fake_data)

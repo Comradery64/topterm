@@ -103,7 +103,7 @@ pub fn run(summarize: bool) -> io::Result<()> {
         transcripts.iter().map(|(id, (cmd, _))| (id.clone(), cmd.clone())).collect();
     let summaries = if summarize {
         let paths = transcripts.into_iter().map(|(id, (_, p))| (id, p)).collect();
-        summarize_all(&ids, paths, &home)
+        summarize_all(&ids, paths)
     } else {
         HashMap::new()
     };
@@ -199,11 +199,11 @@ pub fn last_resume_id(tail: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Summaries
 
-fn summarize_all(ids: &[String], transcripts: HashMap<String, PathBuf>, home: &Path) -> HashMap<String, String> {
+fn summarize_all(ids: &[String], transcripts: HashMap<String, PathBuf>) -> HashMap<String, String> {
     let mut uniq: Vec<String> = ids.to_vec();
     uniq.sort();
     uniq.dedup();
-    let cache = home.join("Library/Caches/topterm/summaries");
+    let cache = summary_cache_dir();
     let _ = fs::create_dir_all(&cache);
 
     let queue = Arc::new(Mutex::new(uniq));
@@ -242,7 +242,11 @@ fn summarize_all(ids: &[String], transcripts: HashMap<String, PathBuf>, home: &P
 
 /// Summary for one transcript, cached by (id, transcript size) so re-runs
 /// only pay for sessions that changed.
-fn summarize_one(transcript: &Path, id: &str, cache: &Path) -> String {
+pub fn summary_cache_dir() -> PathBuf {
+    claude::home().join("Library/Caches/topterm/summaries")
+}
+
+pub fn summarize_one(transcript: &Path, id: &str, cache: &Path) -> String {
     let size = fs::metadata(transcript).map(|m| m.len()).unwrap_or(0);
     let cached = cache.join(format!("{id}-{size}.txt"));
     if let Ok(s) = fs::read_to_string(&cached) {

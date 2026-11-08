@@ -109,10 +109,19 @@ pub fn last_exchange(raw: &str) -> (Option<String>, Option<String>) {
             // text block; tool results (also "user") are skipped above.
             user = json_str(line, "content")
                 .or_else(|| json_str(line, "text"))
-                .filter(|t| !t.trim().is_empty() && !t.starts_with('<'));
+                .filter(|t| !t.trim().is_empty() && !is_injected(t));
         }
     }
     (user, reply)
+}
+
+/// Text that lands in the transcript as a "user" message without the user
+/// typing it: messages from other sessions, slash-command echoes, hooks.
+fn is_injected(t: &str) -> bool {
+    t.starts_with('<')
+        || ["<teammate-message", "<command-name>", "<local-command", "<system-reminder>", "<task-notification>"]
+            .iter()
+            .any(|m| t.contains(m))
 }
 
 /// Read the last `bytes` of a file as text (lossy). Used for transcripts.
@@ -193,7 +202,8 @@ mod tests {
     fn last_exchange_skips_tool_results() {
         let raw = r#"{"type":"user","message":{"role":"user","content":"ok merge it"}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Merged #214."}]}}
-{"type":"user","message":{"content":[{"tool_use_id":"t1","type":"tool_result","content":"x"}]}}"#;
+{"type":"user","message":{"content":[{"tool_use_id":"t1","type":"tool_result","content":"x"}]}}
+{"type":"user","message":{"role":"user","content":"Another session sent: <teammate-message id=1>hi</teammate-message>"}}"#;
         let (u, r) = last_exchange(raw);
         assert_eq!(u.as_deref(), Some("ok merge it"));
         assert_eq!(r.as_deref(), Some("Merged #214."));

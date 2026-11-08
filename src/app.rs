@@ -74,6 +74,24 @@ pub struct App {
     anim: Option<(Instant, f64, f64)>,
     /// Current (possibly mid-ease) detail panel height in rows.
     detail_h: f64,
+    /// Open hibernate preview, if any.
+    pub hibernate: Option<HibUi>,
+}
+
+/// State of the hibernate preview overlay.
+#[derive(Debug)]
+pub struct HibUi {
+    pub plan: crate::hibernate::Plan,
+    /// Result or progress line shown at the bottom of the overlay.
+    pub msg: Option<String>,
+    /// Background job (summary refresh or the hibernate itself).
+    job: Option<std::sync::mpsc::Receiver<HibJob>>,
+}
+
+#[derive(Debug)]
+enum HibJob {
+    Summary(String),
+    Done(Result<String, String>),
 }
 
 impl Default for App {
@@ -83,6 +101,7 @@ impl Default for App {
             selected: 0,
             detail_open: false,
             confirm_kill: false,
+            hibernate: None,
             should_quit: false,
             theme: Theme::default(),
             status: None,
@@ -223,6 +242,7 @@ impl App {
 
     /// Advance the animation clock. Call once per event-loop iteration.
     pub fn tick(&mut self) {
+        self.poll_hibernate();
         if let Some((start, from, to)) = self.anim {
             let t = start.elapsed().as_secs_f64() * 1000.0 / ANIM_MS;
             if t >= 1.0 {
@@ -243,6 +263,9 @@ impl App {
     /// True while something on screen needs ~30fps: an easing panel, or a
     /// GROWING row whose flag is pulsing.
     pub fn needs_fast_tick(&self) -> bool {
+        if self.hibernate.as_ref().is_some_and(|h| h.job.is_some()) {
+            return true;
+        }
         if self.anim.is_some() {
             return true;
         }
@@ -266,6 +289,10 @@ impl App {
         // Ctrl-C always quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+        if self.hibernate.is_some() {
+            self.handle_hibernate_key(key.code);
             return;
         }
         if self.confirm_kill {
@@ -298,7 +325,122 @@ impl App {
                     self.status = None;
                 }
             }
+            KeyCode::Char('H') => self.open_hibernate(),
             _ => {}
+        }
+    }
+
+    /// Select the row for `tty`; false if there is none.
+    pub fn select_tty(&mut self, tty: &str) -> bool {
+        let idx = self.snapshot.as_ref().and_then(|s| s.sessions.iter().position(|x| x.tty == tty));
+        if let Some(i) = idx {
+            self.set_selected(i);
+        }
+        idx.is_some()
+    }
+
+    /// Open the preview for the selected row, returning the reason if not possible.
+    pub fn open_hibernate_preview(&mut self) -> Result<(), String> {
+        self.open_hibernate();
+        match self.hibernate {
+            Some(_) => Ok(()),
+            None => Err(self.status.clone().unwrap_or_else(|| "no session selected".into())),
+        }
+    }
+
+    /// Build a read-only hibernate plan for the selected row and open the preview.
+    fn open_hibernate(&mut self) {
+        let Some(sess) = self.selected_session().cloned() else { return };
+        let title = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.tab_titles.get(&sess.tty).cloned())
+            .unwrap_or_default();
+        match crate::hibernate::plan(&sess, &title) {
+            Ok(plan) => {
+                self.status = None;
+                self.hibernate = Some(HibUi { plan, msg: None, job: None });
+            }
+            Err(e) => self.status = Some(e),
+        }
+    }
+
+    fn handle_hibernate_key(&mut self, code: KeyCode) {
+        let Some(h) = self.hibernate.as_mut() else { return };
+        if h.job.is_some() {
+            return; // a job is running; keys wait for it
+        }
+        let done = h.msg.as_deref().is_some_and(|m| m.starts_with("Hibernated"));
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if let Some(m) = h.msg.take().filter(|_| done) {
+                    self.status = Some(m);
+                }
+                self.hibernate = None;
+            }
+            _ if done => {}
+            KeyCode::Char('R') | KeyCode::Char('r') => {
+                h.msg = Some(if crate::hibernate::reveal(&h.plan.tty) {
+                    "Tab brought to the front. Come back here to continue.".into()
+                } else {
+                    "Could not bring the tab to the front.".into()
+                });
+            }
+            KeyCode::Char('S') | KeyCode::Char('s') => {
+                let Some(path) = h.plan.transcript.clone() else {
+                    h.msg = Some("No transcript found for this session.".into());
+                    return;
+                };
+                let id = h.plan.live.session_id.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let text = crate::index::summarize_one(&path, &id, &crate::index::summary_cache_dir());
+                    let _ = tx.send(HibJob::Summary(text));
+                });
+                h.msg = Some("Asking Haiku for a fresh summary\u{2026}".into());
+                h.job = Some(rx);
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(why) = h.plan.blocked_reason() {
+                    h.msg = Some(format!("Not hibernated: {why}"));
+                    return;
+                }
+                let plan = h.plan.clone();
+                let stamp = std::process::Command::new("date")
+                    .arg("+%b %-d %H:%M")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(HibJob::Done(crate::hibernate::execute(&plan, &stamp)));
+                });
+                h.msg = Some("Checking the session, then asking Claude to exit\u{2026}".into());
+                h.job = Some(rx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect a finished hibernate-overlay job, if any.
+    fn poll_hibernate(&mut self) {
+        let Some(h) = self.hibernate.as_mut() else { return };
+        let Some(rx) = &h.job else { return };
+        match rx.try_recv() {
+            Ok(HibJob::Summary(text)) => {
+                h.plan.summary = Some(crate::hibernate::Summary { text, age_ms: 0, messages_since: 0 });
+                h.msg = None;
+                h.job = None;
+            }
+            Ok(HibJob::Done(res)) => {
+                h.msg = Some(match res {
+                    Ok(m) => m,
+                    Err(e) => format!("\u{2717} {e}"),
+                });
+                h.job = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(_) => h.job = None,
         }
     }
 
@@ -319,7 +461,7 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
-        if self.confirm_kill {
+        if self.confirm_kill || self.hibernate.is_some() {
             return; // overlay is keyboard-only
         }
         match ev.kind {
@@ -414,6 +556,9 @@ impl App {
         self.draw_footer(frame, chunks[4]);
         if self.confirm_kill {
             self.draw_kill_overlay(frame, area);
+        }
+        if self.hibernate.is_some() {
+            self.draw_hibernate_overlay(frame, area);
         }
     }
 
@@ -863,12 +1008,148 @@ impl App {
         spans.extend(chip("esc", "collapse"));
         spans.extend(chip("j/k", "move"));
         spans.extend(chip("click", "select"));
+        spans.extend(chip("H", "hibernate"));
         spans.extend(chip("K", "kill"));
         spans.extend(chip("q", "quit"));
         if let Some(msg) = &self.status {
             spans.push(Span::styled(format!(" {msg}"), th.fg(AMBER)));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    // --------------------------------------------------- hibernate overlay
+
+    fn draw_hibernate_overlay(&self, frame: &mut Frame, area: Rect) {
+        let Some(h) = &self.hibernate else { return };
+        let th = self.theme;
+        let p = &h.plan;
+        self.draw_scrim(frame, area);
+        let width = area.width.saturating_sub(4).min(96);
+        let inner = width.saturating_sub(4) as usize;
+        let label = |k: &str| Span::styled(format!("{k:<9}"), th.dim());
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled("\u{1f4a4} Hibernate this session?", th.modifier(th.fg(MINT), Modifier::BOLD))),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "Window {} \u{b7} Tab {} \u{b7} {}{}",
+                    p.window,
+                    p.tab,
+                    p.tty,
+                    if p.title.is_empty() { String::new() } else { format!(" \u{b7} {}", truncate_chars(&p.title, 50)) }
+                ),
+                th.fg(TEXT),
+            )),
+            Line::from(vec![label("Folder"), Span::raw(truncate_chars(&p.cwd, inner.saturating_sub(9)))]),
+            Line::from(vec![
+                label("Session"),
+                Span::raw(format!(
+                    "{}{} \u{b7} frees ~{}",
+                    p.live.name.clone().map(|n| format!("{n} \u{b7} ")).unwrap_or_default(),
+                    match (p.live.is_idle(), p.live.status_since_ms) {
+                        (true, 0) => "idle".to_string(),
+                        (true, t) => format!("idle {}", fmt_age(now_ms().saturating_sub(t))),
+                        (false, _) => "busy".to_string(),
+                    },
+                    human_kb(p.frees_kb)
+                )),
+            ]),
+            Line::from(""),
+        ];
+        let quoted = |s: &Option<String>| match s {
+            Some(t) => format!("\"{}\"", short_text(t, inner.saturating_sub(17))),
+            None => "(not found)".to_string(),
+        };
+        lines.push(Line::from(vec![Span::styled("You last asked   ", th.dim()), Span::raw(quoted(&p.last_prompt))]));
+        lines.push(Line::from(vec![Span::styled("Claude replied   ", th.dim()), Span::raw(quoted(&p.last_reply))]));
+        match &p.summary {
+            Some(s) => {
+                let when = if s.age_ms == 0 {
+                    "just now".to_string()
+                } else if s.messages_since > 0 {
+                    format!("as of {} ago, {} messages since", fmt_age(s.age_ms), s.messages_since)
+                } else {
+                    format!("as of {} ago, up to date", fmt_age(s.age_ms))
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("Summary          ", th.dim()),
+                    Span::styled(format!("({when}) "), th.dim()),
+                ]));
+                for l in wrap_chars(&short_text(&s.text, 500), inner.saturating_sub(17)).into_iter().take(5) {
+                    lines.push(Line::from(format!("                 {l}")));
+                }
+            }
+            None => lines.push(Line::from(vec![
+                Span::styled("Summary          ", th.dim()),
+                Span::styled("none yet", th.dim()),
+            ])),
+        }
+        lines.push(Line::from(Span::styled(
+            "                 [S] refresh summary (one Haiku call, ~26k tokens of plan usage)",
+            th.dim(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("\u{2500} last lines on this tab's screen {}", "\u{2500}".repeat(inner.saturating_sub(33))),
+            th.fg(BORDER),
+        )));
+        if p.screen.is_empty() {
+            lines.push(Line::from(Span::styled("  (could not read the tab's screen)", th.dim())));
+        }
+        for l in &p.screen {
+            lines.push(Line::from(Span::styled(format!("  {}", truncate_chars(l, inner.saturating_sub(2))), th.fg(MUTED))));
+        }
+        lines.push(Line::from(Span::styled("\u{2500}".repeat(inner), th.fg(BORDER))));
+        lines.push(Line::from(""));
+        match p.blocked_reason() {
+            Some(why) => lines.push(Line::from(Span::styled(format!("Can't hibernate: {why}"), th.fg(EMBER)))),
+            None => {
+                lines.push(Line::from("The tab stays open with its history. Claude exits; resume anytime with:"));
+                lines.push(Line::from(Span::styled(format!("  {}", p.resume_cmd()), th.modifier(th.fg(TEXT), Modifier::BOLD))));
+            }
+        }
+        lines.push(Line::from(""));
+        let key = |k: &str| {
+            Span::styled(
+                format!(" {k} "),
+                if th.plain() {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(th.color(BASE)).bg(th.color(MINT)).add_modifier(Modifier::BOLD)
+                },
+            )
+        };
+        let done = h.msg.as_deref().is_some_and(|m| m.starts_with("Hibernated"));
+        if done {
+            lines.push(Line::from(vec![key("Esc"), Span::raw(" close")]));
+        } else {
+            lines.push(Line::from(vec![
+                key("R"),
+                Span::raw(" reveal tab   "),
+                key("y"),
+                Span::raw(" hibernate   "),
+                key("Esc"),
+                Span::raw(" cancel"),
+            ]));
+        }
+        if let Some(m) = &h.msg {
+            lines.push(Line::from(""));
+            let style = if m.starts_with('\u{2717}') || m.starts_with("Not") { th.fg(EMBER) } else { th.fg(AMBER) };
+            lines.push(Line::from(Span::styled(truncate_chars(m, inner), style)));
+        }
+        let height = (lines.len() as u16 + 2).min(area.height);
+        let popup = centered_rect(area, width, height);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(if th.plain() { BorderType::Plain } else { BorderType::Rounded })
+                    .border_style(th.fg(MINT))
+                    .title(inset_title("hibernate", th, MINT))
+                    .style(if th.plain() { Style::default() } else { Style::default().bg(th.color(PANEL)) }),
+            ),
+            popup,
+        );
     }
 
     // -------------------------------------------------------- kill overlay
@@ -878,10 +1159,17 @@ impl App {
             Some(s) => s,
             None => return,
         };
-        let th = self.theme;
         let pgids: Vec<i32> = sess.pgids.iter().copied().filter(|&g| g > 1).collect();
+        self.draw_scrim(frame, area);
 
-        // Darken everything behind the modal.
+        let h = (pgids.len() as u16 + 7).min(area.height);
+        let popup = centered_rect(area, 60, h);
+        self.draw_kill_body(frame, popup, sess, &pgids);
+    }
+
+    /// Darken everything behind a modal.
+    fn draw_scrim(&self, frame: &mut Frame, area: Rect) {
+        let th = self.theme;
         if !th.plain() {
             let scrim = th.color(SCRIM);
             let ghost = th.color(shade(MUTED, 0.6));
@@ -897,8 +1185,10 @@ impl App {
             }
         }
 
-        let h = (pgids.len() as u16 + 7).min(area.height);
-        let popup = centered_rect(area, 60, h);
+    }
+
+    fn draw_kill_body(&self, frame: &mut Frame, popup: Rect, sess: &Session, pgids: &[i32]) {
+        let th = self.theme;
         frame.render_widget(Clear, popup);
 
         let mut lines = vec![
@@ -915,7 +1205,7 @@ impl App {
             ]),
             Line::from(""),
         ];
-        for g in &pgids {
+        for g in pgids {
             lines.push(Line::from(vec![
                 Span::styled("  pgid ", th.dim()),
                 Span::styled(format!("{:<8}", g), th.fg(AMBER)),
@@ -1168,6 +1458,11 @@ fn wrap_chars(s: &str, width: usize) -> Vec<String> {
     }
     out.push(cur);
     out
+}
+
+/// Collapse whitespace and truncate to `width` characters with an ellipsis.
+pub fn short_text(s: &str, width: usize) -> String {
+    truncate_chars(&s.split_whitespace().collect::<Vec<_>>().join(" "), width)
 }
 
 fn truncate_chars(s: &str, width: usize) -> String {
