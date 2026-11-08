@@ -1085,7 +1085,9 @@ pub fn buffer_to_ansi(buf: &Buffer) -> String {
 /// "512 MB" / "2.31 GB" from KB.
 pub fn human_kb(kb: u64) -> String {
     let mb = kb as f64 / 1024.0;
-    if mb >= 1024.0 {
+    if mb >= 1024.0 * 1024.0 {
+        format!("{:.1} TB", mb / 1024.0 / 1024.0)
+    } else if mb >= 1024.0 {
         format!("{:.2} GB", mb / 1024.0)
     } else {
         format!("{:.0} MB", mb)
@@ -1202,8 +1204,8 @@ fn clip(s: &str, width: usize, wide: bool) -> String {
 pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
     let (b, r, d) = if color { (BOLD, RESET, DIM) } else { ("", "", "") };
     let width = output_width();
-    // 10 tty + 10 rss + 9 delta + 6 cpu + 5 procs, one space between each.
-    let fixed = 10 + 10 + 9 + 6 + 5 + 5;
+    // 10 tty + 10 mem + 9 delta + 6 cpu + 5 procs + 11 claude, one space between each.
+    let fixed = 10 + 10 + 9 + 6 + 5 + 11 + 6;
     let rest = (width.saturating_sub(fixed + 2)).max(48);
     let tab_w = (rest * 34 / 100).clamp(14, 48);
     let lbl_w = (rest * 30 / 100).clamp(18, 44);
@@ -1234,18 +1236,22 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
         "{}memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM{}",
         d, r
     ));
+    if let Some(sys) = system_line(snap) {
+        lines.push(sys);
+    }
     if let Some(hint) = &snap.tab_title_hint {
         lines.push(format!("{}{}{}", d, hint, r));
     }
     lines.push(String::new());
     lines.push(format!(
-        "{}{:<10} {:>10} {:>9} {:>6} {:>5} {:<tw$} {:<lw$} {}{}",
+        "{}{:<10} {:>10} {:>9} {:>6} {:>5} {:<11} {:<tw$} {:<lw$} {}{}",
         b,
         "TTY",
         "MEM",
         "\u{394}MEM",
         "%CPU",
         "PROCS",
+        "CLAUDE",
         "TAB",
         "SHELL/RECENT",
         "CWD",
@@ -1263,13 +1269,14 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
         let c = color_for(sess.total_mem_kb);
         let flag = if sess.growing { "   \u{2190} GROWING" } else { "" };
         lines.push(format!(
-            "{}{:<10} {:>10} {:>9} {:>6.1} {:>5} {:<tw$} {:<lw$} {}{}{}",
+            "{}{:<10} {:>10} {:>9} {:>6.1} {:>5} {:<11} {:<tw$} {:<lw$} {}{}{}",
             c,
             sess.tty,
             human_kb(sess.total_mem_kb),
             fmt_delta(sess.delta_mem_kb),
             sess.total_cpu_pct,
             sess.proc_count,
+            claude_cell(sess, now_ms()),
             clip(tab, tab_w, wide),
             clip(&label, lbl_w, wide),
             clip(&sess.cwd, cwd_w, wide),
@@ -1298,6 +1305,59 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
                 p.cpu_pct,
                 p.pid,
                 if c.is_empty() { "" } else { r },
+            ));
+        }
+    }
+
+    if !snap.mcp.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{}MCP servers (every Claude session starts its own copy){}", b, r));
+        lines.push(format!("{}{:<28} {:>5} {:>6} {:>10}  ORPHANED{}", d, "SERVER", "TABS", "PROCS", "MEM", r));
+        for g in &snap.mcp {
+            let orphan = if g.orphaned > 0 {
+                format!("{} procs, {} (session gone)", g.orphaned, human_kb(g.orphaned_mem_kb))
+            } else {
+                "-".to_string()
+            };
+            lines.push(format!(
+                "{:<28} {:>5} {:>6} {:>10}  {}",
+                clip(&g.name, 28, false),
+                g.tabs,
+                g.procs,
+                human_kb(g.mem_kb),
+                orphan
+            ));
+        }
+    }
+
+    let scroll: Vec<&Session> = {
+        let mut v: Vec<&Session> = snap.sessions.iter().filter(|s| s.scrollback_chars.unwrap_or(0) > 0).collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.scrollback_chars));
+        v
+    };
+    if !scroll.is_empty() {
+        let total: u64 = scroll.iter().filter_map(|s| s.scrollback_chars).sum();
+        let term_kb = snap
+            .emulators
+            .iter()
+            .filter(|p| p.command.contains("Terminal.app"))
+            .map(|p| p.mem_kb)
+            .sum::<u64>();
+        lines.push(String::new());
+        lines.push(format!(
+            "{}Terminal.app scrollback by tab{}  {}{} chars total; share of Terminal's {} is estimated from each tab's share of characters{}",
+            b, r, d, human_count(total), human_kb(term_kb), r
+        ));
+        for s in scroll.iter().take(if wide { usize::MAX } else { 15 }) {
+            let n = s.scrollback_chars.unwrap_or(0);
+            let share = if total == 0 { 0 } else { (term_kb as u128 * n as u128 / total as u128) as u64 };
+            let tab = snap.tab_titles.get(&s.tty).map(String::as_str).unwrap_or("-");
+            lines.push(format!(
+                "{:<10} {:>8} chars  \u{2248}{:>9}  {}",
+                s.tty,
+                human_count(n),
+                human_kb(share),
+                clip(tab, 48, wide)
             ));
         }
     }
@@ -1333,6 +1393,71 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
     lines.join("\n")
 }
 
+/// "swap 27.0 GB of 28.0 GB · SSD 23.8 TB written in 44d (~540 GB/day)".
+pub fn system_line(snap: &Snapshot) -> Option<String> {
+    let sys = &snap.system;
+    let mut parts = Vec::new();
+    if sys.swap_total_bytes > 0 {
+        parts.push(format!(
+            "swap {} of {}",
+            human_kb(sys.swap_used_bytes / 1024),
+            human_kb(sys.swap_total_bytes / 1024)
+        ));
+    }
+    if let (Some(w), Some(per_day)) = (sys.ssd_written_bytes, sys.ssd_bytes_per_day()) {
+        parts.push(format!(
+            "internal SSD {} written in {} (~{}/day)",
+            human_kb(w / 1024),
+            fmt_age(sys.uptime_secs * 1000),
+            human_kb(per_day / 1024)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("  \u{b7}  "))
+}
+
+/// "idle 6d 2h" / "busy" / "" for a session's Claude instance.
+pub fn claude_cell(sess: &Session, now_ms: u64) -> String {
+    match &sess.claude {
+        Some(c) if c.is_idle() && c.status_since_ms > 0 => {
+            format!("idle {}", fmt_age(now_ms.saturating_sub(c.status_since_ms)))
+        }
+        Some(c) if c.is_idle() => "idle".to_string(),
+        Some(_) => "busy".to_string(),
+        None => String::new(),
+    }
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Milliseconds -> "6d 2h" / "3h 10m" / "4m" / "now".
+pub fn fmt_age(ms: u64) -> String {
+    let m = ms / 60_000;
+    let (d, h, mm) = (m / 1440, (m / 60) % 24, m % 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {mm}m")
+    } else if mm > 0 {
+        format!("{mm}m")
+    } else {
+        "now".to_string()
+    }
+}
+
+/// 1_234_567 -> "1.2M".
+pub fn human_count(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        n if n >= 1_000 => format!("{:.0}K", n as f64 / 1e3),
+        n => n.to_string(),
+    }
+}
+
 /// Render exactly one styled TUI frame off-screen. Used by `--demo-frame` and
 /// by the render tests, so the visuals stay assertable without a real tty.
 pub fn render_frame(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -1365,6 +1490,7 @@ mod tests {
         assert_eq!(human_kb(512 * 1024), "512 MB");
         assert_eq!(human_kb(2 * 1024 * 1024 + 317 * 1024), "2.31 GB");
         assert_eq!(human_kb(0), "0 MB");
+        assert_eq!(human_kb(23 * 1024 * 1024 * 1024 + 800 * 1024 * 1024), "23.8 TB");
     }
 
     #[test]
@@ -1392,6 +1518,10 @@ mod tests {
             procs: vec![],
             depths: vec![],
             growing: false,
+            claude: None,
+            claude_mem_kb: 0,
+            mcp_mem_kb: 0,
+            scrollback_chars: None,
         }
     }
 
@@ -1406,6 +1536,8 @@ mod tests {
             tab_titles: HashMap::new(),
             tab_title_hint: None,
             taken_at: std::time::Instant::now(),
+            system: Default::default(),
+            mcp: Vec::new(),
         }
     }
 
@@ -1509,6 +1641,8 @@ mod tests {
             tab_titles: HashMap::from([("ttys001".to_string(), "claude".to_string())]),
             tab_title_hint: None,
             taken_at: std::time::Instant::now(),
+            system: Default::default(),
+            mcp: Vec::new(),
         }
     }
 

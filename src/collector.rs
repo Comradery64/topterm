@@ -64,6 +64,48 @@ pub struct Session {
     pub depths: Vec<usize>,
     /// True when total_mem_kb grew >= GROWING_THRESHOLD_KB across recent samples.
     pub growing: bool,
+    /// The Claude Code instance running in this tab, if any.
+    pub claude: Option<crate::claude::Live>,
+    /// Memory of that Claude process plus everything under it (MCP servers,
+    /// helpers) — what exiting it would free.
+    pub claude_mem_kb: u64,
+    /// Memory held by MCP server processes in this tab.
+    pub mcp_mem_kb: u64,
+    /// Characters of scrollback Terminal.app holds for this tab, when measured.
+    pub scrollback_chars: Option<u64>,
+}
+
+/// One MCP server, by name, across the whole machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpGroup {
+    pub name: String,
+    /// Number of processes (an `npm exec` wrapper and its node child count as two).
+    pub procs: usize,
+    /// Number of distinct tabs running a copy.
+    pub tabs: usize,
+    pub mem_kb: u64,
+    /// Processes reparented to launchd: their Claude session is gone, so
+    /// nothing will ever talk to them again.
+    pub orphaned: usize,
+    pub orphaned_mem_kb: u64,
+}
+
+/// Machine-wide memory-pressure numbers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct System {
+    pub swap_used_bytes: u64,
+    pub swap_total_bytes: u64,
+    /// Bytes written to the internal SSD since boot, when readable.
+    pub ssd_written_bytes: Option<u64>,
+    pub uptime_secs: u64,
+}
+
+impl System {
+    /// Average internal-SSD writes per day since boot.
+    pub fn ssd_bytes_per_day(&self) -> Option<u64> {
+        let w = self.ssd_written_bytes?;
+        (self.uptime_secs > 0).then(|| (w as f64 * 86_400.0 / self.uptime_secs as f64) as u64)
+    }
 }
 
 /// One full sample of the system.
@@ -90,6 +132,9 @@ pub struct Snapshot {
     /// Automation permission has not been granted).
     pub tab_title_hint: Option<String>,
     pub taken_at: Instant,
+    pub system: System,
+    /// MCP servers grouped by name, biggest first.
+    pub mcp: Vec<McpGroup>,
 }
 
 /// Session RSS growth flag threshold (50 MB in KB).
@@ -190,6 +235,12 @@ const SHELLS: &[&str] = &[
 ///
 /// This is the only function here that executes commands.
 pub fn collect() -> io::Result<Snapshot> {
+    collect_opts(false)
+}
+
+/// `collect()`, optionally also measuring per-tab scrollback (slow: ~10s with
+/// 100 tabs, so it is cached for SCROLLBACK_TTL).
+pub fn collect_opts(scrollback: bool) -> io::Result<Snapshot> {
     let ps_out = Command::new("ps")
         .args(["-axo", "pid=,ppid=,pgid=,tty=,rss=,%cpu=,etime=,command="])
         .stderr(Stdio::null())
@@ -207,7 +258,20 @@ pub fn collect() -> io::Result<Snapshot> {
     let proc_count = procs.len();
     let total_mem_kb: u64 = procs.iter().map(|p| p.mem_kb).sum();
 
+    let all_procs = procs.clone();
     let (mut sessions, detached, emulators) = group_sessions(procs);
+
+    let variants = crate::claude::variants(&crate::claude::home());
+    for s in &mut sessions {
+        attach_claude(s, &variants);
+    }
+    let mcp = mcp_groups(&sessions, &all_procs);
+    if scrollback {
+        let chars = cached_scrollback();
+        for s in &mut sessions {
+            s.scrollback_chars = chars.get(&s.tty).copied();
+        }
+    }
 
     // One batched lsof for all shell pids; parse whatever stdout was
     // produced even when lsof exits non-zero (some pids — e.g. the
@@ -251,7 +315,252 @@ pub fn collect() -> io::Result<Snapshot> {
         tab_titles,
         tab_title_hint,
         taken_at: Instant::now(),
+        system: read_system(),
+        mcp,
     })
+}
+
+/// Fill `claude`, `claude_mem_kb` and `mcp_mem_kb` from the session's tree.
+fn attach_claude(s: &mut Session, variants: &[crate::claude::Variant]) {
+    s.mcp_mem_kb = s.procs.iter().filter(|p| mcp_name(&p.command).is_some()).map(|p| p.mem_kb).sum();
+    let Some((i, live)) = s
+        .procs
+        .iter()
+        .enumerate()
+        .find_map(|(i, p)| crate::claude::live(p.pid, variants).map(|l| (i, l)))
+    else {
+        return;
+    };
+    s.claude_mem_kb = subtree_mem(&s.procs, &s.depths, i);
+    s.claude = Some(live);
+}
+
+/// Memory of `procs[i]` plus its descendants, given tree-ordered procs and
+/// depths (descendants are the following entries deeper than it). Pure.
+pub fn subtree_mem(procs: &[ProcInfo], depths: &[usize], i: usize) -> u64 {
+    let d = depths[i];
+    procs[i].mem_kb
+        + procs[i + 1..]
+            .iter()
+            .zip(&depths[i + 1..])
+            .take_while(|(_, &dd)| dd > d)
+            .map(|(p, _)| p.mem_kb)
+            .sum::<u64>()
+}
+
+/// A readable MCP server name for a process command line, or `None` if it
+/// isn't one. `npm exec @acme/weather-mcp` -> "weather-mcp";
+/// `python3 ~/.local/bin/notes-tool mcp` -> "notes-tool mcp". Pure.
+pub fn mcp_name(command: &str) -> Option<String> {
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    let base = |t: &str| t.rsplit('/').next().unwrap_or(t).to_string();
+    // Someone searching for MCP processes is not one.
+    if matches!(toks.first().map(|t| base(t)).as_deref(), Some("grep" | "pgrep" | "rg" | "egrep" | "awk" | "ps")) {
+        return None;
+    }
+    for (i, t) in toks.iter().enumerate() {
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with('-') || lower.contains(['^', '$', '|', '*', '\\', '(', ')', ':'])
+            || !(lower.contains("mcp") || lower.contains("modelcontextprotocol")) {
+            continue;
+        }
+        if lower == "mcp" {
+            return Some(match i.checked_sub(1).map(|j| toks[j]) {
+                Some(prev) if !prev.starts_with('-') => format!("{} mcp", base(prev)),
+                _ => "mcp".to_string(),
+            });
+        }
+        // `uvx --with mcp[cli]<2 blender-mcp`: a dependency spec, not the server.
+        if lower.contains('[') || lower.contains('<') || lower.contains('=') {
+            continue;
+        }
+        return Some(base(t));
+    }
+    None
+}
+
+/// Group every MCP process on the machine by server name. Pure.
+pub fn mcp_groups(sessions: &[Session], all: &[ProcInfo]) -> Vec<McpGroup> {
+    let mut groups: HashMap<String, McpGroup> = HashMap::new();
+    let mut tabs: HashMap<String, HashSet<&str>> = HashMap::new();
+    let entry = |groups: &mut HashMap<String, McpGroup>, name: &str| {
+        groups.entry(name.to_string()).or_insert_with(|| McpGroup {
+            name: name.to_string(),
+            procs: 0,
+            tabs: 0,
+            mem_kb: 0,
+            orphaned: 0,
+            orphaned_mem_kb: 0,
+        });
+    };
+    let mut in_tab: HashSet<i32> = HashSet::new();
+    for s in sessions {
+        for p in &s.procs {
+            if let Some(name) = mcp_name(&p.command) {
+                entry(&mut groups, &name);
+                let g = groups.get_mut(&name).expect("inserted");
+                g.procs += 1;
+                g.mem_kb += p.mem_kb;
+                tabs.entry(name).or_default().insert(&s.tty);
+                in_tab.insert(p.pid);
+            }
+        }
+    }
+    for p in all.iter().filter(|p| !in_tab.contains(&p.pid)) {
+        let Some(name) = mcp_name(&p.command) else { continue };
+        entry(&mut groups, &name);
+        let g = groups.get_mut(&name).expect("inserted");
+        g.procs += 1;
+        g.mem_kb += p.mem_kb;
+        if p.ppid == 1 {
+            g.orphaned += 1;
+            g.orphaned_mem_kb += p.mem_kb;
+        }
+    }
+    let mut out: Vec<McpGroup> = groups
+        .into_values()
+        .map(|mut g| {
+            g.tabs = tabs.get(&g.name).map_or(0, |t| t.len());
+            g
+        })
+        .collect();
+    out.sort_by(|a, b| b.mem_kb.cmp(&a.mem_kb).then(a.name.cmp(&b.name)));
+    out
+}
+
+fn sysctl(name: &str) -> String {
+    Command::new("sysctl")
+        .args(["-n", name])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+fn read_system() -> System {
+    let (swap_total_bytes, swap_used_bytes) = parse_swapusage(&sysctl("vm.swapusage"));
+    let boot = parse_boottime(&sysctl("kern.boottime"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut cmd = Command::new("ioreg");
+    cmd.args(["-r", "-c", "IOBlockStorageDevice", "-w0", "-d", "2", "-l"]);
+    let ssd_written_bytes = run_with_timeout(cmd, Duration::from_secs(3))
+        .and_then(|(out, _)| parse_internal_ssd_writes(&out));
+    System {
+        swap_used_bytes,
+        swap_total_bytes,
+        ssd_written_bytes,
+        uptime_secs: boot.map_or(0, |b| now.saturating_sub(b)),
+    }
+}
+
+/// "total = 28672.00M  used = 27691.50M  free = 980.50M  (encrypted)" ->
+/// (total, used) bytes. Pure.
+pub fn parse_swapusage(raw: &str) -> (u64, u64) {
+    let field = |key: &str| -> u64 {
+        raw.split(&format!("{key} = "))
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|v| {
+                let (num, unit) = v.split_at(v.len().saturating_sub(1));
+                let n: f64 = num.parse().ok()?;
+                let mult = match unit {
+                    "K" => 1u64 << 10,
+                    "M" => 1 << 20,
+                    "G" => 1 << 30,
+                    _ => return None,
+                };
+                Some((n * mult as f64) as u64)
+            })
+            .unwrap_or(0)
+    };
+    (field("total"), field("used"))
+}
+
+/// "{ sec = 1790302637, usec = 885563 } Thu Sep 24 ..." -> 1790302637. Pure.
+pub fn parse_boottime(raw: &str) -> Option<u64> {
+    raw.split("sec = ").nth(1)?.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+/// From `ioreg -r -c IOBlockStorageDevice -d 2 -l`, the "Bytes (Write)"
+/// statistic of the driver under the internal NVMe device (skipping SD cards
+/// and disk images). Pure.
+pub fn parse_internal_ssd_writes(raw: &str) -> Option<u64> {
+    let mut internal = false;
+    for line in raw.lines() {
+        if let Some(i) = line.find("<class ") {
+            let class = line[i + 7..].split([',', '>']).next().unwrap_or("");
+            if class.ends_with("BlockStorageDevice") || class.ends_with("BlockDevice") {
+                internal = class.contains("NVMe") || class.contains("ANS");
+            }
+            continue;
+        }
+        if internal {
+            if let Some(i) = line.find("\"Bytes (Write)\"=") {
+                let digits: String = line[i + 16..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                return digits.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// Per-tab scrollback size, reused for this long because reading every tab's
+/// history takes ~10s with 100+ tabs.
+const SCROLLBACK_TTL: Duration = Duration::from_secs(300);
+const SCROLLBACK_TIMEOUT: Duration = Duration::from_secs(90);
+
+#[allow(clippy::type_complexity)]
+static SCROLLBACK_CACHE: Mutex<Option<(Instant, HashMap<String, u64>)>> = Mutex::new(None);
+
+/// tty -> characters of scrollback in Terminal.app. Read-only AppleScript.
+fn cached_scrollback() -> HashMap<String, u64> {
+    let mut cache = match SCROLLBACK_CACHE.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Some((at, m)) = cache.as_ref() {
+        if at.elapsed() < SCROLLBACK_TTL {
+            return m.clone();
+        }
+    }
+    let script = [
+        "set d to (ASCII character 9)",
+        "set out to \"\"",
+        "tell application \"Terminal\"",
+        "repeat with w in windows",
+        "try",
+        "repeat with t in tabs of w",
+        "set n to 0",
+        "try",
+        "set h to history of t",
+        "set n to length of h",
+        "end try",
+        "set out to out & (tty of t) & d & n & linefeed",
+        "end repeat",
+        "end try",
+        "end repeat",
+        "end tell",
+        "return out",
+    ];
+    let mut cmd = Command::new("osascript");
+    for line in script {
+        cmd.args(["-e", line]);
+    }
+    let m: HashMap<String, u64> = run_with_timeout(cmd, SCROLLBACK_TIMEOUT)
+        .map(|(out, _)| {
+            out.lines()
+                .filter_map(|l| {
+                    let (tty, n) = l.split_once('\t')?;
+                    Some((tty.trim().rsplit('/').next()?.to_string(), n.trim().parse().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    *cache = Some((Instant::now(), m.clone()));
+    m
 }
 
 /// Fill `delta_mem_kb` and `growing` on `current` by comparing each
@@ -704,6 +1013,10 @@ fn build_session(
         procs: ordered.iter().map(|&m| procs[m].clone()).collect(),
         depths,
         growing: false,
+        claude: None,
+        claude_mem_kb: 0,
+        mcp_mem_kb: 0,
+        scrollback_chars: None,
     }
 }
 
@@ -887,6 +1200,8 @@ zsh      700 demo  cwd                             cwd|rtd info error: No such f
             tab_titles: HashMap::new(),
             tab_title_hint: None,
             taken_at: Instant::now(),
+            system: Default::default(),
+            mcp: Vec::new(),
         };
         let prev = mk(sessions.clone(), detached.clone());
         let mut cur = mk(sessions, detached);
@@ -926,4 +1241,64 @@ zsh      700 demo  cwd                             cwd|rtd info error: No such f
         assert_eq!(etime_secs("03:04:25"), 3 * 3600 + 4 * 60 + 25);
         assert_eq!(etime_secs("2-03:45:12"), 2 * 86400 + 3 * 3600 + 45 * 60 + 12);
     }
+
+    #[test]
+    fn mcp_names() {
+        assert_eq!(mcp_name("npm exec @acme/weather-mcp").as_deref(), Some("weather-mcp"));
+        assert_eq!(mcp_name("node /x/node_modules/.bin/weather-mcp").as_deref(), Some("weather-mcp"));
+        assert_eq!(mcp_name("/v/bin/python3 /u/.local/bin/notes-tool mcp").as_deref(), Some("notes-tool mcp"));
+        assert_eq!(mcp_name("/A/Editor.app/x/mcp-server-darwin-arm64 --ws-port 1").as_deref(), Some("mcp-server-darwin-arm64"));
+        assert_eq!(mcp_name("uv tool uvx --with mcp[cli]<2.0.0 blender-mcp").as_deref(), Some("blender-mcp"));
+        assert_eq!(mcp_name("node server.js --mcp-port 3"), None);
+        assert_eq!(mcp_name("zsh"), None);
+        assert_eq!(mcp_name("grep -iE mcp|x"), None);
+        assert_eq!(mcp_name("osascript -e ^MCP"), None);
+        assert_eq!(mcp_name("python3 -c fn mcp_name(command: &str)"), None);
+    }
+
+    #[test]
+    fn mcp_groups_count_tabs_and_orphans() {
+        let p = |pid, ppid, cmd: &str, kb| ProcInfo {
+            pid, ppid, pgid: pid, tty: None, mem_kb: kb, cpu_pct: 0.0, etime: "1".into(), command: cmd.into(),
+        };
+        let seed = vec![p(1, 0, "zsh", 0)];
+        let idx = HashMap::from([(1, 0)]);
+        let mut a = build_session("ttys001".into(), &[0], &seed, &HashMap::new(), &idx);
+        a.procs = vec![p(10, 9, "npm exec @x/foo-mcp", 100), p(11, 10, "node /b/foo-mcp", 200)];
+        let mut b = a.clone();
+        b.tty = "ttys002".into();
+        b.procs = vec![p(20, 19, "node /b/foo-mcp", 300)];
+        let all = vec![p(30, 1, "node /b/foo-mcp", 50), p(31, 500, "zsh", 1)];
+        let g = mcp_groups(&[a, b], &all);
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].procs, g[0].tabs, g[0].mem_kb, g[0].orphaned, g[0].orphaned_mem_kb), (4, 2, 650, 1, 50));
+    }
+
+    #[test]
+    fn subtree_mem_sums_descendants_only() {
+        let p = |kb| ProcInfo { pid: 0, ppid: 0, pgid: 0, tty: None, mem_kb: kb, cpu_pct: 0.0, etime: String::new(), command: String::new() };
+        let procs = vec![p(1), p(10), p(100), p(1000), p(5)];
+        let depths = vec![0, 1, 2, 2, 1];
+        assert_eq!(subtree_mem(&procs, &depths, 1), 1110);
+        assert_eq!(subtree_mem(&procs, &depths, 4), 5);
+    }
+
+    #[test]
+    fn system_parsers() {
+        assert_eq!(
+            parse_swapusage("total = 28672.00M  used = 27691.50M  free = 980.50M  (encrypted)"),
+            (28672 << 20, (27691.5 * 1048576.0) as u64)
+        );
+        assert_eq!(parse_boottime("{ sec = 1790302637, usec = 885563 } Thu Sep 24"), Some(1790302637));
+        let ioreg = r#"+-o AppleSDXCBlockStorageDevice  <class AppleSDXCBlockStorageDevice, id 1>
+  +-o IOBlockStorageDriver  <class IOBlockStorageDriver, id 2>
+        "Statistics" = {"Bytes (Write)"=111,"Operations (Write)"=1}
++-o NS_01@1  <class IOEmbeddedNVMeBlockDevice, id 3>
+  +-o IOBlockStorageDriver  <class IOBlockStorageDriver, id 4>
+        "Statistics" = {"Operations (Write)"=9,"Bytes (Write)"=23802787205120}"#;
+        assert_eq!(parse_internal_ssd_writes(ioreg), Some(23802787205120));
+        let s = System { ssd_written_bytes: Some(86_400), uptime_secs: 43_200, ..Default::default() };
+        assert_eq!(s.ssd_bytes_per_day(), Some(172_800));
+    }
+
 }

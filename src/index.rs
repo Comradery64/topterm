@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::claude::{self, find_transcripts, is_uuid};
 use crate::collector::{self, run_with_timeout};
 
 /// How much of each tab's scrollback to read when looking for the exit line.
@@ -56,29 +57,6 @@ pub enum Claude {
     None,
 }
 
-/// A Claude Code config dir and the command that launches it: `~/.claude`
-/// is plain `claude`; each cc-mirror variant `~/.cc-mirror/<name>/config` is
-/// launched as `<name>`, and keeps its own sessions/ and projects/.
-#[derive(Debug, Clone)]
-pub struct Variant {
-    pub cmd: String,
-    pub dir: PathBuf,
-}
-
-fn variants(home: &Path) -> Vec<Variant> {
-    let mut out = vec![Variant { cmd: "claude".into(), dir: home.join(".claude") }];
-    if let Ok(entries) = fs::read_dir(home.join(".cc-mirror")) {
-        let mut extra: Vec<Variant> = entries
-            .flatten()
-            .filter(|e| e.path().join("config/sessions").is_dir() || e.path().join("config/projects").is_dir())
-            .map(|e| Variant { cmd: e.file_name().to_string_lossy().into_owned(), dir: e.path().join("config") })
-            .collect();
-        extra.sort_by(|a, b| a.cmd.cmp(&b.cmd));
-        out.extend(extra);
-    }
-    out
-}
-
 impl Claude {
     fn id(&self) -> Option<&str> {
         match self {
@@ -96,8 +74,8 @@ pub fn run(summarize: bool) -> io::Result<()> {
              access granted under System Settings > Privacy & Security > Automation?)",
         )
     })?;
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let variants = variants(&home);
+    let home = claude::home();
+    let variants = claude::variants(&home);
 
     let by_tty: HashMap<&str, &collector::Session> =
         snap.sessions.iter().map(|s| (s.tty.as_str(), s)).collect();
@@ -107,13 +85,9 @@ pub fn run(summarize: bool) -> io::Result<()> {
         .map(|t| {
             let sess = by_tty.get(t.tty.as_str());
             let cwd = sess.map_or("?".to_string(), |s| s.cwd.clone());
-            let live = sess.and_then(|s| {
-                s.procs.iter().find_map(|p| {
-                    variants
-                        .iter()
-                        .find_map(|v| live_claude(&v.dir.join(format!("sessions/{}.json", p.pid))))
-                })
-            });
+            let live = sess
+                .and_then(|s| s.claude.clone())
+                .map(|l| Claude::Running { id: l.session_id, name: l.name });
             let claude = live.unwrap_or_else(|| match last_resume_id(&t.tail) {
                 Some(id) => Claude::Exited { id },
                 None => Claude::None,
@@ -207,13 +181,6 @@ fn clean_title(t: &str) -> String {
         .to_string()
 }
 
-/// `~/.claude/sessions/<pid>.json` exists while that Claude Code process runs.
-fn live_claude(path: &Path) -> Option<Claude> {
-    let json = fs::read_to_string(path).ok()?;
-    let id = json_str(&json, "sessionId")?;
-    is_uuid(&id).then(|| Claude::Running { id, name: json_str(&json, "name").filter(|n| !n.is_empty()) })
-}
-
 /// The last `claude --resume <uuid>` (or `-r <uuid>`) in a scrollback tail —
 /// what Claude Code prints on exit, or what the user typed last. Pure.
 pub fn last_resume_id(tail: &str) -> Option<String> {
@@ -227,32 +194,6 @@ pub fn last_resume_id(tail: &str) -> Option<String> {
         }
     }
     found.map(|(_, id)| id)
-}
-
-fn is_uuid(s: &str) -> bool {
-    s.len() == 36
-        && s.char_indices().all(|(i, c)| match i {
-            8 | 13 | 18 | 23 => c == '-',
-            _ => c.is_ascii_hexdigit(),
-        })
-}
-
-/// Minimal `"key":"value"` extractor for the flat JSON Claude Code writes.
-/// Avoids a JSON dependency for two string fields. Pure.
-pub fn json_str(json: &str, key: &str) -> Option<String> {
-    let start = json.find(&format!("\"{key}\":\""))? + key.len() + 4;
-    let mut out = String::new();
-    let mut esc = false;
-    for c in json[start..].chars() {
-        match (esc, c) {
-            (true, 'n') => { out.push(' '); esc = false; }
-            (true, c) => { out.push(c); esc = false; }
-            (false, '\\') => esc = true,
-            (false, '"') => return Some(out),
-            (false, c) => out.push(c),
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -297,24 +238,6 @@ fn summarize_all(ids: &[String], transcripts: HashMap<String, PathBuf>, home: &P
         eprintln!();
     }
     Arc::try_unwrap(results).ok().and_then(|m| m.into_inner().ok()).unwrap_or_default()
-}
-
-/// Map session id -> (launch command, transcript path), searching
-/// `<config>/projects/<dir>/<id>.jsonl` in every variant.
-fn find_transcripts(variants: &[Variant], ids: &[String]) -> HashMap<String, (String, PathBuf)> {
-    let mut out = HashMap::new();
-    for v in variants {
-        let Ok(dirs) = fs::read_dir(v.dir.join("projects")) else { continue };
-        for d in dirs.flatten() {
-            for id in ids {
-                let p = d.path().join(format!("{id}.jsonl"));
-                if !out.contains_key(id) && p.is_file() {
-                    out.insert(id.clone(), (v.cmd.clone(), p));
-                }
-            }
-        }
-    }
-    out
 }
 
 /// Summary for one transcript, cached by (id, transcript size) so re-runs
@@ -467,14 +390,6 @@ mod tests {
         assert_eq!(tabs[0].title, "Fix login");
         assert_eq!(tabs[0].tail, "hist\nline");
         assert_eq!(tabs[1].title, "");
-    }
-
-    #[test]
-    fn json_str_extracts_and_unescapes() {
-        let j = format!(r#"{{"pid":1,"sessionId":"{ID}","name":"say \"hi\""}}"#);
-        assert_eq!(json_str(&j, "sessionId").as_deref(), Some(ID));
-        assert_eq!(json_str(&j, "name").as_deref(), Some("say \"hi\""));
-        assert_eq!(json_str(&j, "missing"), None);
     }
 
     #[test]

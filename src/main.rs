@@ -6,6 +6,7 @@
 mod app;
 mod collector;
 mod fake;
+mod claude;
 mod index;
 mod theme;
 
@@ -48,6 +49,8 @@ struct Args {
     index: bool,
     /// With --index, add a Haiku recap per Claude session (--summarize).
     summarize: bool,
+    /// Measure per-tab Terminal.app scrollback (--scrollback; ~10s).
+    scrollback: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -60,6 +63,7 @@ fn parse_args() -> Result<Args, String> {
         fake_data: false,
         index: false,
         summarize: false,
+        scrollback: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -72,6 +76,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-color" => args.no_color = true,
             "--wide" => args.wide = true,
             "--index" => args.index = true,
+            "--scrollback" => args.scrollback = true,
             "--summarize" => {
                 args.index = true;
                 args.summarize = true;
@@ -87,13 +92,14 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "topterm — Activity Monitor for terminal sessions\n\n\
-                     USAGE: topterm [-t|--tui] [--interval SECS] [--wide] [--no-color]\n\
+                     USAGE: topterm [-t|--tui] [--interval SECS] [--wide] [--no-color] [--scrollback]\n\
                             topterm --index [--summarize] > tabs.md\n\n\
                      With no flags, prints one plain-text snapshot and exits.\n\n\
                      -t, --tui        launch the interactive TUI instead\n\
                      --interval SECS  sampling interval, only used with --tui (default 2)\n\
                      --wide           print full command lines and cwds, never truncated\n\
                      --no-color       disable all ANSI color/styling\n\
+                     --scrollback     also measure each tab's Terminal.app scrollback (~10s)\n\
                      --index          markdown map of every Terminal.app tab: window/tab, title,\n\
                      \x20                cwd, and its Claude session's resume command (read-only)\n\
                      --summarize      --index plus a short recap per Claude session from Haiku\n\
@@ -120,11 +126,11 @@ fn restore_terminal() {
     let _ = io::stdout().flush();
 }
 
-fn run_once(no_color: bool, wide: bool, fake_data: bool) -> io::Result<()> {
+fn run_once(no_color: bool, wide: bool, fake_data: bool, scrollback: bool) -> io::Result<()> {
     let snap = if fake_data {
         fake::snapshot(fake::STEPS - 1)
     } else {
-        collector::collect()?
+        collector::collect_opts(scrollback)?
     };
     let color = !no_color && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
     println!("{}", app::plain_report(&snap, color, wide));
@@ -226,7 +232,7 @@ fn main() -> ExitCode {
     } else if args.tui {
         run_tui(&args)
     } else {
-        run_once(args.no_color, args.wide, args.fake_data)
+        run_once(args.no_color, args.wide, args.fake_data, args.scrollback)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

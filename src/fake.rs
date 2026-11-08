@@ -115,6 +115,10 @@ fn session(
         procs: out,
         depths,
         growing: false,
+        claude: None,
+        claude_mem_kb: 0,
+        mcp_mem_kb: 0,
+        scrollback_chars: None,
     }
 }
 
@@ -256,6 +260,8 @@ pub fn snapshot(step: usize) -> Snapshot {
         ]),
         tab_title_hint: None,
         taken_at: Instant::now(),
+        system: Default::default(),
+        mcp: Vec::new(),
     }
 }
 
