@@ -66,6 +66,37 @@ topterm --index > tabs.md        # read-only map of every tab and its Claude ses
 topterm --summarize > tabs.md    # same, plus a short recap per session
 ```
 
+### Memory details
+
+- **CLAUDE column**: `idle 4d 16h` / `busy` for the Claude Code session in each tab, read from
+  `~/.claude/sessions/<pid>.json` (and cc-mirror variants).
+- **Swap and SSD writes** in the header: swap used, and bytes written to the internal SSD since
+  boot with a per-day average, from the disk's own counter (`ioreg`). Sustained swapping shows up
+  here as hundreds of GB a day.
+- **MCP servers**: every Claude session starts its own copy of each MCP server. The one-shot table
+  lists each server with how many tabs run it, its processes, total memory, and any copies
+  orphaned to `launchd` after their session ended.
+- **`--scrollback`**: each tab's Terminal.app scrollback in characters, with an estimate of its
+  share of Terminal's memory (proportional to characters, so it is an estimate). Takes ~10s with
+  100+ tabs; the TUI refreshes it every 5 minutes.
+
+### Hibernate (TUI, `H`)
+
+Exit an idle Claude session without closing its tab. Select a row and press `H` for a preview:
+
+- window/tab position, folder, session name, idle time, and the memory exiting would free
+- the last prompt you typed and Claude's last reply, read from the transcript
+- the newest cached summary, labelled with its age and how many messages came after it
+  (`S` refreshes it with one Haiku call)
+- the last lines currently on that tab's screen
+- `R` brings the tab to the front so you can look before deciding
+
+`y` hibernates. It refuses if Claude is busy or is running anything besides MCP servers,
+language servers, and `caffeinate`, and right before acting it re-checks that the same Claude
+process is still on that tab, on the same conversation, and idle. It then types `/exit` into the
+tab, waits for Claude to quit, and prints a card in the tab with the folder, last ask, summary,
+and the `claude --resume <id>` line. The tab and its history stay. Nothing is done in bulk.
+
 ### The tab index
 
 Too many tabs to close safely? `topterm --index` writes a markdown map you can
@@ -84,7 +115,8 @@ keep, so closing a tab never means losing track of it. Per tab, in window/tab or
 and MCP disabled, fed a trimmed copy of the transcript. It never resumes the
 original session, adds nothing to it, and saves no new session. Recaps are
 cached in `~/Library/Caches/topterm/summaries` by session id and transcript
-size, so re-runs only pay for sessions that changed.
+size, so re-runs only pay for sessions that changed. While it runs, each Haiku
+call briefly appears as a live Claude session to your other sessions.
 
 Both modes only read. Nothing is closed, cleared, or signalled.
 
@@ -102,6 +134,7 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 |---|---|
 | click / `↑↓` / `j k` | select session |
 | `Enter` / click again | expand / collapse detail |
+| `H` | hibernate preview for the selected Claude session (`R` reveal, `S` summary, `y` hibernate) |
 | `K` then `y` | SIGTERM every process group in the session |
 | `Esc` | collapse / cancel |
 | `q` / `Ctrl-C` | quit |
@@ -111,6 +144,7 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 | Flag | |
 |---|---|
 | `-t`, `--tui` | interactive TUI (default is a one-shot plain table) |
+| `--scrollback` | also measure each tab's Terminal.app scrollback (~10s) |
 | `--interval SECS` | TUI sampling interval (default 2) |
 | `--wide` | never truncate commands or paths |
 | `--no-color` | plain output |
