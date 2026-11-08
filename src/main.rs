@@ -163,11 +163,17 @@ fn run_tui(args: &Args) -> io::Result<()> {
     // receiver (the UI loop) is dropped.
     let (tx, rx) = mpsc::channel::<io::Result<collector::Snapshot>>();
     let interval = Duration::from_secs_f64(args.interval_secs);
-    thread::spawn(move || loop {
-        if tx.send(collector::collect()).is_err() {
-            return;
+    // The first sample skips the slow scrollback read so the screen fills
+    // immediately; later samples include it (cached for minutes).
+    thread::spawn(move || {
+        let mut scrollback = false;
+        loop {
+            if tx.send(collector::collect_opts(scrollback)).is_err() {
+                return;
+            }
+            scrollback = true;
+            thread::sleep(interval);
         }
-        thread::sleep(interval);
     });
 
     // Panic hook first, so any panic below still restores the terminal.

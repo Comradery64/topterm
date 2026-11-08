@@ -465,7 +465,7 @@ impl App {
                     snap.sessions.len(),
                     snap.proc_count,
                 );
-                let note = snap.tab_title_hint.clone().unwrap_or_else(|| {
+                let note = snap.tab_title_hint.clone().or_else(|| system_line(snap)).unwrap_or_else(|| {
                     "memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM"
                         .to_string()
                 });
@@ -579,6 +579,14 @@ impl App {
                     Line::from(Span::styled(fmt_delta(sess.delta_mem_kb), self.delta_style(sess.delta_mem_kb))),
                     Line::from(format!("{:.1}", sess.total_cpu_pct)),
                     Line::from(Span::styled(format!("{}", sess.proc_count), th.dim())),
+                    Line::from(Span::styled(
+                        claude_cell(sess, now_ms()),
+                        match &sess.claude {
+                            Some(c) if c.is_idle() => th.fg(AMBER),
+                            Some(_) => th.fg(MINT),
+                            None => th.dim(),
+                        },
+                    )),
                     Line::from(tab),
                     Line::from(label),
                     Line::from(Span::styled(sess.cwd.clone(), th.dim())),
@@ -615,13 +623,14 @@ impl App {
             Constraint::Length(9),
             Constraint::Length(6),
             Constraint::Length(5),
+            Constraint::Length(11),
             Constraint::Fill(3),
             Constraint::Fill(3),
             Constraint::Fill(4),
             Constraint::Length(8),
         ];
         let header = Row::new(vec![
-            "TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "TAB", "SHELL/RECENT", "CWD", "",
+            "TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "CLAUDE", "TAB", "SHELL/RECENT", "CWD", "",
         ])
         .style(th.modifier(th.on(MUTED, PANEL), Modifier::BOLD));
 
