@@ -1,5 +1,4 @@
-//! `topterm --index`: a read-only map of every Terminal.app tab — window and
-//! tab position, title, cwd, and the Claude Code session it holds (live, or
+//! `topterm --index`: a read-only map of every Terminal.app tab — title, cwd, and the Claude Code session it holds (live, or
 //! the `claude --resume <id>` line printed when it exited) — so tabs can be
 //! closed later without losing track of what they were. `--summarize` adds a
 //! short recap per session from a one-off Haiku call that reads a copy of the
@@ -40,11 +39,11 @@ In at most two short sentences, say what the user was working on and where it wa
 Plain text, no preamble, no markdown. Never include secrets, API keys, passwords, tokens, or \
 credentials, even partially.";
 
-/// One Terminal.app tab, in on-screen order.
+/// One Terminal.app tab. There is no reliable on-screen position to report:
+/// with macOS native tabs every tab is its own scripting "window", ordered by
+/// recent focus, so tabs are identified by tty, title, and folder instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
-    pub window: usize,
-    pub tab: usize,
     pub tty: String,
     pub title: String,
     pub tail: String,
@@ -125,13 +124,9 @@ fn read_tabs() -> Option<Vec<Tab>> {
         "set r to (ASCII character 30)",
         "set out to \"\"",
         "tell application \"Terminal\"",
-        "set wi to 0",
         "repeat with w in windows",
-        "set wi to wi + 1",
         "try",
-        "set ti to 0",
         "repeat with t in tabs of w",
-        "set ti to ti + 1",
         "set ct to \"\"",
         "try",
         "set ct to custom title of t",
@@ -142,7 +137,7 @@ fn read_tabs() -> Option<Vec<Tab>> {
         "set n to length of h",
         &format!("if n > {TAIL_CHARS} then set h to text (n - {}) thru n of h", TAIL_CHARS - 1),
         "end try",
-        "set out to out & wi & f & ti & f & (tty of t) & f & ct & f & h & r",
+        "set out to out & (tty of t) & f & ct & f & h & r",
         "end repeat",
         "end try",
         "end repeat",
@@ -162,13 +157,14 @@ fn read_tabs() -> Option<Vec<Tab>> {
 pub fn parse_tabs(raw: &str) -> Vec<Tab> {
     raw.split(RECORD)
         .filter_map(|rec| {
-            let mut it = rec.trim_start_matches('\n').splitn(5, FIELD);
-            let window = it.next()?.trim().parse().ok()?;
-            let tab = it.next()?.trim().parse().ok()?;
+            let mut it = rec.trim_start_matches('\n').splitn(3, FIELD);
             let tty = it.next()?.trim().rsplit('/').next()?.to_string();
+            if !tty.starts_with("ttys") {
+                return None;
+            }
             let title = clean_title(it.next()?);
             let tail = it.next().unwrap_or("").to_string();
-            Some(Tab { window, tab, tty, title, tail })
+            Some(Tab { tty, title, tail })
         })
         .collect()
 }
@@ -342,20 +338,22 @@ pub fn render(
     stamp: &str,
 ) -> String {
     let cmd = |id: &str| cmds.get(id).map_or("claude", String::as_str).to_string();
+    let mut sorted: Vec<&(Tab, String, Claude)> = rows.iter().collect();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.title.cmp(&b.0.title)));
     let mut s = format!(
-        "# Terminal tab index ({stamp})\n\n{} tabs. To bring one back: open a tab, `cd` to its folder, \
-         run its resume command.\n",
+        "# Terminal tab index ({stamp})\n\n{} tabs, grouped by folder. To find a tab, match its title; \
+         `topterm -t` then `H`, `R` brings it to the front. To bring one back after closing: open a tab, \
+         `cd` to its folder, run its resume command.\n",
         rows.len()
     );
-    let mut window = 0;
-    for (t, cwd, claude) in rows {
-        if t.window != window {
-            window = t.window;
-            s.push_str(&format!("\n## Window {window}\n"));
+    let mut folder: Option<&str> = None;
+    for (t, cwd, claude) in sorted {
+        if folder != Some(cwd.as_str()) {
+            folder = Some(cwd.as_str());
+            s.push_str(&format!("\n## `{cwd}`\n"));
         }
         let title = if t.title.is_empty() { "(untitled)" } else { &t.title };
-        s.push_str(&format!("\n### Tab {} · {} · {}\n", t.tab, t.tty, title));
-        s.push_str(&format!("- Folder: `{cwd}`\n"));
+        s.push_str(&format!("\n### {title} · {}\n", t.tty));
         match claude {
             Claude::Running { id, name } => {
                 let name = name.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
@@ -387,10 +385,10 @@ mod tests {
 
     #[test]
     fn parse_tabs_reads_records() {
-        let raw = format!("1\u{1f}2\u{1f}/dev/ttys004\u{1f}✳ Fix login\u{1f}hist\nline\u{1e}\n2\u{1f}1\u{1f}/dev/ttys009\u{1f}\u{1f}\u{1e}");
-        let tabs = parse_tabs(&raw);
+        let raw = "/dev/ttys004\u{1f}✳ Fix login\u{1f}hist\nline\u{1e}\n/dev/ttys009\u{1f}\u{1f}\u{1e}";
+        let tabs = parse_tabs(raw);
         assert_eq!(tabs.len(), 2);
-        assert_eq!((tabs[0].window, tabs[0].tab, tabs[0].tty.as_str()), (1, 2, "ttys004"));
+        assert_eq!(tabs[0].tty, "ttys004");
         assert_eq!(tabs[0].title, "Fix login");
         assert_eq!(tabs[0].tail, "hist\nline");
         assert_eq!(tabs[1].title, "");
@@ -403,19 +401,20 @@ mod tests {
     }
 
     #[test]
-    fn render_groups_by_window() {
-        let tab = |w, t| Tab { window: w, tab: t, tty: format!("ttys00{t}"), title: "T".into(), tail: String::new() };
+    fn render_groups_by_folder() {
+        let tab = |t: u8, title: &str| Tab { tty: format!("ttys00{t}"), title: title.into(), tail: String::new() };
         let rows = vec![
-            (tab(1, 1), "/a".into(), Claude::Exited { id: ID.into() }),
-            (tab(2, 1), "/b".into(), Claude::None),
-            (tab(2, 2), "/c".into(), Claude::Running { id: ID2.into(), name: Some("n".into()) }),
+            (tab(3, "T"), "/c".into(), Claude::Running { id: ID2.into(), name: Some("n".into()) }),
+            (tab(1, "T"), "/a".into(), Claude::Exited { id: ID.into() }),
+            (tab(2, "T"), "/b".into(), Claude::None),
         ];
         let sums = HashMap::from([(ID.to_string(), "Did X.".to_string())]);
         let cmds = HashMap::from([(ID2.to_string(), "work".to_string())]);
         let out = render(&rows, &cmds, &sums, "now");
-        assert!(out.contains("## Window 1\n\n### Tab 1 · ttys001 · T\n- Folder: `/a`\n- Claude: exited · `claude --resume 0abc"));
+        assert!(out.contains("## `/a`\n\n### T · ttys001\n- Claude: exited · `claude --resume 0abc"));
+        assert!(out.find("`/a`").unwrap() < out.find("`/b`").unwrap());
         assert!(out.contains("- Summary: Did X.\n"));
-        assert!(out.contains("## Window 2"));
+        assert!(!out.contains("Window"));
         assert!(out.contains(&format!("- Claude: running (n) · `work --resume {ID2}`")));
     }
 }

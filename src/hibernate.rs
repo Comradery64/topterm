@@ -45,8 +45,6 @@ pub struct Summary {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub tty: String,
-    pub window: usize,
-    pub tab: usize,
     pub title: String,
     pub cwd: String,
     pub live: Live,
@@ -91,7 +89,7 @@ pub fn plan(sess: &Session, title: &str) -> Result<Plan, String> {
         .map(|(p, _)| format!("{} (pid {})", crate::app::short_cmd(&p.command, 40), p.pid))
         .collect();
 
-    let (window, tab, screen) = tab_screen(&sess.tty).unwrap_or((0, 0, Vec::new()));
+    let screen = tab_screen(&sess.tty).unwrap_or_default();
 
     let home = claude::home();
     let variants = claude::variants(&home);
@@ -107,8 +105,6 @@ pub fn plan(sess: &Session, title: &str) -> Result<Plan, String> {
 
     Ok(Plan {
         tty: sess.tty.clone(),
-        window,
-        tab,
         title: title.to_string(),
         cwd: sess.cwd.clone(),
         frees_kb: sess.claude_mem_kb,
@@ -156,22 +152,17 @@ fn cached_summary(transcript: &Path, id: &str) -> Option<Summary> {
     Some(Summary { text, age_ms, messages_since })
 }
 
-/// (window index, tab index, last PREVIEW_LINES non-blank screen lines) for
-/// the Terminal.app tab on `tty`. Reads `contents`, which is only what is
+/// The last PREVIEW_LINES non-blank screen lines of the Terminal.app tab on
+/// `tty`. Reads `contents`, which is only what is
 /// on screen, not the scrollback. Inside AppleScript `contents of x` first
 /// dereferences the loop variable, hence `contents of (contents of t)`.
-fn tab_screen(tty: &str) -> Option<(usize, usize, Vec<String>)> {
+fn tab_screen(tty: &str) -> Option<Vec<String>> {
     let script = format!(
-        "set f to (ASCII character 31)\n\
-         tell application \"Terminal\"\n\
-         set wi to 0\n\
+        "tell application \"Terminal\"\n\
          repeat with w in windows\n\
-         set wi to wi + 1\n\
          try\n\
-         set ti to 0\n\
          repeat with t in tabs of w\n\
-         set ti to ti + 1\n\
-         if tty of t is \"/dev/{tty}\" then return (wi as text) & f & (ti as text) & f & (contents of (contents of t))\n\
+         if tty of t is \"/dev/{tty}\" then return \"@\" & (contents of (contents of t))\n\
          end repeat\n\
          end try\n\
          end repeat\n\
@@ -181,13 +172,10 @@ fn tab_screen(tty: &str) -> Option<(usize, usize, Vec<String>)> {
     let mut cmd = Command::new("osascript");
     cmd.args(["-e", &script]);
     let (out, _) = run_with_timeout(cmd, OSA_TIMEOUT)?;
-    let mut it = out.splitn(3, '\u{1f}');
-    let w = it.next()?.trim().parse().ok()?;
-    let t = it.next()?.trim().parse().ok()?;
-    let lines: Vec<String> = it.next().unwrap_or("").lines().map(|l| l.trim_end().to_string()).collect();
+    let lines: Vec<String> = out.strip_prefix('@')?.lines().map(|l| l.trim_end().to_string()).collect();
     let end = lines.iter().rposition(|l| !l.trim().is_empty()).map_or(0, |i| i + 1);
     let start = end.saturating_sub(PREVIEW_LINES);
-    Some((w, t, lines[start..end].to_vec()))
+    Some(lines[start..end].to_vec())
 }
 
 /// Bring the tab to the front so the user can look at it. Changes focus only.
@@ -350,7 +338,7 @@ mod tests {
     #[test]
     fn card_has_wake_command() {
         let plan = Plan {
-            tty: "ttys001".into(), window: 1, tab: 2, title: "T".into(), cwd: "/a".into(),
+            tty: "ttys001".into(), title: "T".into(), cwd: "/a".into(),
             live: Live { pid: 1, session_id: "11111111-2222-4333-8444-555555555555".into(), name: None,
                          status: "idle".into(), status_since_ms: 0, cmd: "work".into() },
             frees_kb: 700 * 1024, screen: vec![], last_prompt: Some("ok merge it".into()), last_reply: None,

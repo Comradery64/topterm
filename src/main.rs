@@ -108,7 +108,7 @@ fn parse_args() -> Result<Args, String> {
                      --wide           print full command lines and cwds, never truncated\n\
                      --no-color       disable all ANSI color/styling\n\
                      --scrollback     also measure each tab's Terminal.app scrollback (~10s)\n\
-                     --index          markdown map of every Terminal.app tab: window/tab, title,\n\
+                     --index          markdown map of every Terminal.app tab by folder: title,\n\
                      \x20                cwd, and its Claude session's resume command (read-only)\n\
                      --summarize      --index plus a short recap per Claude session from Haiku\n\
                      \x20                (low effort, reads a copy of the transcript, saves no session)"

@@ -84,7 +84,7 @@ topterm --summarize > tabs.md    # same, plus a short recap per session
 
 Exit an idle Claude session without closing its tab. Select a row and press `H` for a preview:
 
-- window/tab position, folder, session name, idle time, and the memory exiting would free
+- folder, session name, idle time, and the memory exiting would free
 - the last prompt you typed and Claude's last reply, read from the transcript
 - the newest cached summary, labelled with its age and how many messages came after it
   (`S` refreshes it with one Haiku call)
@@ -100,7 +100,9 @@ and the `claude --resume <id>` line. The tab and its history stay. Nothing is do
 ### The tab index
 
 Too many tabs to close safely? `topterm --index` writes a markdown map you can
-keep, so closing a tab never means losing track of it. Per tab, in window/tab order:
+keep, so closing a tab never means losing track of it. Tabs are grouped by folder.
+(There is no reliable window/tab position to show: with macOS native tabs every tab is its
+own scripting "window", numbered by recent focus.) Per tab:
 
 - the tab's title and working directory
 - the Claude Code session it holds: live sessions are read from

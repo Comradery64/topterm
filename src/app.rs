@@ -1032,9 +1032,7 @@ impl App {
             Line::from(""),
             Line::from(Span::styled(
                 format!(
-                    "Window {} \u{b7} Tab {} \u{b7} {}{}",
-                    p.window,
-                    p.tab,
+                    "{}{}",
                     p.tty,
                     if p.title.is_empty() { String::new() } else { format!(" \u{b7} {}", truncate_chars(&p.title, 50)) }
                 ),
