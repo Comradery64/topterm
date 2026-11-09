@@ -55,6 +55,9 @@ struct Args {
     /// Render one TUI frame with the hibernate preview open for this tty and
     /// exit (--demo-hibernate TTY). Undocumented; read-only, never hibernates.
     demo_hibernate: Option<String>,
+    /// Print the hibernate card for this tty's session and exit
+    /// (--demo-card TTY). Undocumented; read-only, never hibernates.
+    demo_card: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -69,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
         summarize: false,
         scrollback: false,
         demo_hibernate: None,
+        demo_card: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -82,6 +86,9 @@ fn parse_args() -> Result<Args, String> {
             "--wide" => args.wide = true,
             "--index" => args.index = true,
             "--scrollback" => args.scrollback = true,
+            "--demo-card" => {
+                args.demo_card = Some(it.next().ok_or("--demo-card requires a tty")?);
+            }
             "--demo-hibernate" => {
                 args.demo_hibernate = Some(it.next().ok_or("--demo-hibernate requires a tty")?);
             }
@@ -181,6 +188,21 @@ fn run_demo_hibernate(tty: &str) -> io::Result<()> {
     io::stdout().flush()
 }
 
+/// Print the card hibernating `tty` would write, without doing anything.
+fn run_demo_card(tty: &str) -> io::Result<()> {
+    let snap = collector::collect()?;
+    let sess = snap
+        .sessions
+        .iter()
+        .find(|s| s.tty == tty)
+        .ok_or_else(|| io::Error::other(format!("no session on {tty}")))?;
+    let title = snap.tab_titles.get(tty).cloned().unwrap_or_default();
+    let plan = hibernate::plan(sess, &title).map_err(io::Error::other)?;
+    let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
+    print!("{}", hibernate::card(&plan, "preview", width).replace("\r\n", "\n"));
+    io::stdout().flush()
+}
+
 fn run_tui(args: &Args) -> io::Result<()> {
     // Sampler thread: never block the UI on ps/lsof. It exits when the
     // receiver (the UI loop) is dropped.
@@ -254,7 +276,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = if let Some(tty) = &args.demo_hibernate {
+    let result = if let Some(tty) = &args.demo_card {
+        run_demo_card(tty)
+    } else if let Some(tty) = &args.demo_hibernate {
         run_demo_hibernate(tty)
     } else if args.index {
         index::run(args.summarize)

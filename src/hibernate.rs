@@ -173,9 +173,28 @@ fn tab_screen(tty: &str) -> Option<Vec<String>> {
     cmd.args(["-e", &script]);
     let (out, _) = run_with_timeout(cmd, OSA_TIMEOUT)?;
     let lines: Vec<String> = out.strip_prefix('@')?.lines().map(|l| l.trim_end().to_string()).collect();
-    let end = lines.iter().rposition(|l| !l.trim().is_empty()).map_or(0, |i| i + 1);
+    Some(preview_lines(&lines))
+}
+
+/// Lines worth previewing from a tab's screen: the conversation, not Claude
+/// Code's own chrome at the bottom (input box, status line, mode line). The
+/// chrome starts at the rule above the last `❯` prompt; if that can't be
+/// found, the last CHROME_FALLBACK lines are dropped. Pure.
+pub fn preview_lines(lines: &[String]) -> Vec<String> {
+    const CHROME_FALLBACK: usize = 10;
+    let is_rule = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with('\u{2500}') || t.starts_with('\u{256d}') || t.starts_with('\u{250c}')
+    };
+    let prompt = lines.iter().rposition(|l| l.trim_start().starts_with('\u{276f}'));
+    let cut = match prompt {
+        Some(p) => lines[..p].iter().rposition(|l| is_rule(l)).unwrap_or(p),
+        None => lines.len().saturating_sub(CHROME_FALLBACK),
+    };
+    let body = &lines[..cut];
+    let end = body.iter().rposition(|l| !l.trim().is_empty()).map_or(0, |i| i + 1);
     let start = end.saturating_sub(PREVIEW_LINES);
-    Some(lines[start..end].to_vec())
+    body[start..end].to_vec()
 }
 
 /// Bring the tab to the front so the user can look at it. Changes focus only.
@@ -238,21 +257,81 @@ fn wait_exit(pid: i32, limit: Duration) -> bool {
     false
 }
 
-/// The card written into the tab after Claude exits.
-pub fn card(plan: &Plan, stamp: &str) -> String {
-    let mut s = format!(
-        "\r\n\x1b[1m💤 HIBERNATED\x1b[0m  {stamp}  ·  freed ~{}\r\n",
-        crate::app::human_kb(plan.frees_kb)
-    );
-    s.push_str(&format!("Folder:  {}\r\n", plan.cwd));
+/// The card written into the tab after Claude exits: a full-width block
+/// with a coloured left bar (no right border, so wide characters can't
+/// misalign it). `width` is the tab's column count.
+pub fn card(plan: &Plan, stamp: &str, width: usize) -> String {
+    use crate::app::{fmt_age, human_kb, now_ms, short_text, wrap_chars};
+    const BAR: &str = "\x1b[38;5;79m\u{2503}\x1b[0m";
+    const DIM: &str = "\x1b[2m";
+    const BOLD: &str = "\x1b[1m";
+    const RESET: &str = "\x1b[0m";
+    let width = width.clamp(60, 120);
+    let text_w = width - 6;
+    let mut out: Vec<String> = Vec::new();
+    let rule = |label: &str| {
+        let fill = width.saturating_sub(label.chars().count() + 5);
+        format!("\x1b[38;5;79m\u{250f}\u{2501} {BOLD}{label}{RESET}\x1b[38;5;79m {}{RESET}", "\u{2501}".repeat(fill))
+    };
+    let line = |s: &str| format!("{BAR}  {s}");
+    let blank = || BAR.to_string();
+    let block = |out: &mut Vec<String>, heading: &str, body: &str, max_lines: usize| {
+        out.push(line(&format!("{DIM}{heading}{RESET}")));
+        // Strip markdown markers, then cut so the wrapped text ends in "…"
+        // inside the last line instead of being dropped silently.
+        let plain = body.replace("**", "").replace("## ", "").replace("# ", "").replace('`', "");
+        let budget = (text_w - 2) * max_lines - max_lines * 8;
+        let wrapped = wrap_chars(&short_text(&plain, budget), text_w - 2);
+        for l in wrapped.into_iter().take(max_lines) {
+            out.push(line(&format!("  {l}")));
+        }
+    };
+
+    out.push(String::new());
+    out.push(rule(&format!("\u{1f4a4} HIBERNATED \u{b7} {stamp} \u{b7} freed ~{}", human_kb(plan.frees_kb))));
+    out.push(blank());
+    let idle = match plan.live.status_since_ms {
+        0 => String::new(),
+        t => format!("was idle {}", fmt_age(now_ms().saturating_sub(t))),
+    };
+    match (&plan.live.name, idle.is_empty()) {
+        (Some(n), false) => out.push(line(&format!("{DIM}Session{RESET}  {n} \u{b7} {idle}"))),
+        (Some(n), true) => out.push(line(&format!("{DIM}Session{RESET}  {n}"))),
+        (None, false) => out.push(line(&format!("{DIM}Session{RESET}  {idle}"))),
+        (None, true) => {}
+    }
+    if !plan.title.is_empty() {
+        out.push(line(&format!("{DIM}Tab{RESET}      {}", short_text(&plan.title, text_w - 9))));
+    }
+    out.push(line(&format!("{DIM}Folder{RESET}   {}", plan.cwd)));
+    out.push(blank());
     if let Some(p) = &plan.last_prompt {
-        s.push_str(&format!("Last ask: {}\r\n", crate::app::short_text(p, 100)));
+        block(&mut out, "You last asked", p, 3);
+        out.push(blank());
+    }
+    if let Some(r) = &plan.last_reply {
+        block(&mut out, "Claude last replied", r, 3);
+        out.push(blank());
     }
     if let Some(sum) = &plan.summary {
-        s.push_str(&format!("Summary: {}\r\n", crate::app::short_text(&sum.text, 200)));
+        let when = if sum.age_ms == 0 { "just now".to_string() } else { format!("as of {} ago", fmt_age(sum.age_ms)) };
+        block(&mut out, &format!("Summary ({when})"), &sum.text, 6);
+        out.push(blank());
     }
-    s.push_str(&format!("Wake:    \x1b[1m{}\x1b[0m\r\n\r\n", plan.resume_cmd()));
-    s
+    out.push(line(&format!("{DIM}Wake{RESET}     \x1b[1;38;5;79m{}{RESET}", plan.resume_cmd())));
+    out.push(format!("\x1b[38;5;79m\u{2517}{}{RESET}", "\u{2501}".repeat(width - 1)));
+    out.push(String::new());
+    out.join("\r\n") + "\r\n"
+}
+
+/// Column count of a tty, or 100 if it can't be read.
+fn tty_width(tty: &str) -> usize {
+    use std::os::fd::AsRawFd;
+    let Ok(f) = fs::OpenOptions::new().read(true).open(format!("/dev/{tty}")) else { return 100 };
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: TIOCGWINSZ only reads the terminal's size into `ws`.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) };
+    if rc == 0 && ws.ws_col > 0 { ws.ws_col as usize } else { 100 }
 }
 
 /// Write `text` to the tab's terminal as output (appears on screen; nothing
@@ -278,7 +357,7 @@ pub fn execute(plan: &Plan, stamp: &str) -> Result<String, String> {
             "Claude did not exit within 15s. Nothing else was done; check the tab.".into(),
         );
     }
-    if !write_to_tty(&plan.tty, &card(plan, stamp)) {
+    if !write_to_tty(&plan.tty, &card(plan, stamp, tty_width(&plan.tty))) {
         return Ok(format!(
             "Hibernated, but the card could not be printed. Wake: {}",
             plan.resume_cmd()
@@ -325,6 +404,18 @@ mod tests {
     }
 
     #[test]
+    fn preview_skips_claude_chrome() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let screen = l(&["older", "\u{23fa} Merged #214.", "", "  Next: confirm the scope.", "",
+            "\u{2500}\u{2500}\u{2500}\u{2500}", "\u{276f} ", "\u{2500}\u{2500}\u{2500}\u{2500}",
+            "  plans \u{b7} main \u{b7} 27%", "  \u{23f5}\u{23f5} bypass permissions on"]);
+        assert_eq!(preview_lines(&screen), l(&["older", "\u{23fa} Merged #214.", "", "  Next: confirm the scope."]));
+        // No prompt found: drop the last 10 lines.
+        let plain: Vec<String> = (0..15).map(|i| format!("line {i}")).collect();
+        assert_eq!(preview_lines(&plain), (0..5).map(|i| format!("line {i}")).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn helpers_vs_blockers() {
         for c in ["npm exec @acme/weather-mcp", "node /x/.bin/acme-mcp-server", "caffeinate -i -t 300",
                   "/opt/clangd --background-index", "/x/sourcekit-lsp", "/A/Editor.app/x/mcp-server-darwin-arm64"] {
@@ -344,8 +435,9 @@ mod tests {
             frees_kb: 700 * 1024, screen: vec![], last_prompt: Some("ok merge it".into()), last_reply: None,
             transcript: None, summary: None, blockers: vec![],
         };
-        let c = card(&plan, "Nov 7 15:02");
-        assert!(c.contains("HIBERNATED") && c.contains("freed ~700 MB") && c.contains("Last ask: ok merge it"));
+        let c = card(&plan, "Nov 7 15:02", 80);
+        assert!(c.contains("HIBERNATED") && c.contains("freed ~700 MB") && c.contains("You last asked"));
+        assert!(c.contains("ok merge it"));
         assert!(c.contains("work --resume 11111111-2222-4333-8444-555555555555"));
         assert_eq!(plan.blocked_reason(), None);
         let busy = Plan { live: Live { status: "busy".into(), ..plan.live.clone() }, ..plan.clone() };

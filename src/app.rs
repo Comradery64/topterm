@@ -1422,7 +1422,7 @@ pub fn short_cmd(cmd: &str, width: usize) -> String {
 
 /// Break `s` into chunks of at most `width` chars, preferring a space boundary
 /// but hard-splitting tokens longer than the line. Always returns >= 1 chunk.
-fn wrap_chars(s: &str, width: usize) -> Vec<String> {
+pub fn wrap_chars(s: &str, width: usize) -> Vec<String> {
     if width == usize::MAX || s.chars().count() <= width {
         return vec![s.to_string()];
     }
