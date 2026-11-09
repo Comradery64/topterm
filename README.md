@@ -97,6 +97,13 @@ process is still on that tab, on the same conversation, and idle. It then types 
 tab, waits for Claude to quit, and prints a card in the tab with the folder, last ask, summary,
 and the `claude --resume <id>` line. The tab and its history stay. Nothing is done in bulk.
 
+### Hibernate stale sessions (TUI, `Z`)
+
+`Z` lists every Claude session idle for 7+ days (change the default with
+`--stale-days N`, or `+`/`-` in the overlay), oldest first, with what each would free and
+any that would be skipped because they're running something. `y` works through them one at a
+time with exactly the same checks and card as `H`, showing each result as it goes.
+
 ### The tab index
 
 Too many tabs to close safely? `topterm --index` writes a markdown map you can
@@ -136,6 +143,8 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 |---|---|
 | click / `↑↓` / `j k` | select session |
 | `Enter` / click again | expand / collapse detail |
+| `s` / `r` / click a header | sort by that column / reverse (click the same header again to reverse) |
+| `Z` | hibernate every Claude session idle 7+ days (`+`/`-` adjust, `y` run) |
 | `H` | hibernate preview for the selected Claude session (`R` reveal, `S` summary, `y` hibernate) |
 | `K` then `y` | SIGTERM every process group in the session |
 | `Esc` | collapse / cancel |
@@ -146,6 +155,7 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 | Flag | |
 |---|---|
 | `-t`, `--tui` | interactive TUI (default is a one-shot plain table) |
+| `--stale-days N` | threshold for `Z` in the TUI (default 7) |
 | `--scrollback` | also measure each tab's Terminal.app scrollback (~10s) |
 | `--interval SECS` | TUI sampling interval (default 2) |
 | `--wide` | never truncate commands or paths |

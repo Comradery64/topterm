@@ -76,6 +76,120 @@ pub struct App {
     detail_h: f64,
     /// Open hibernate preview, if any.
     pub hibernate: Option<HibUi>,
+    /// Open bulk-hibernate overlay, if any.
+    pub bulk: Option<BulkUi>,
+    /// Bulk hibernate threshold in days (--stale-days, default 7).
+    pub stale_days: u64,
+    pub sort_col: SortCol,
+    pub sort_desc: bool,
+    /// Header cell x ranges from the last draw, for click-to-sort.
+    header_cells: Vec<(u16, u16)>,
+    header_y: u16,
+}
+
+/// Table column the rows are sorted by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortCol {
+    Tty,
+    Mem,
+    Delta,
+    Cpu,
+    Procs,
+    Claude,
+    Tab,
+    Recent,
+    Cwd,
+}
+
+/// Column order as drawn (the trailing flag column is not sortable).
+pub const SORT_COLS: [SortCol; 9] = [
+    SortCol::Tty,
+    SortCol::Mem,
+    SortCol::Delta,
+    SortCol::Cpu,
+    SortCol::Procs,
+    SortCol::Claude,
+    SortCol::Tab,
+    SortCol::Recent,
+    SortCol::Cwd,
+];
+
+impl SortCol {
+    /// Numbers start biggest-first; text starts A-Z.
+    fn default_desc(self) -> bool {
+        matches!(self, SortCol::Mem | SortCol::Delta | SortCol::Cpu | SortCol::Procs | SortCol::Claude)
+    }
+}
+
+/// Order two sessions by `col`, ascending. Rows with nothing to sort on
+/// (no Claude, no title) are reported as `None` so callers keep them last
+/// in either direction. Pure.
+pub fn sort_key_cmp(
+    a: &Session,
+    b: &Session,
+    col: SortCol,
+    titles: &HashMap<String, String>,
+    now_ms: u64,
+) -> Option<std::cmp::Ordering> {
+    let label = |s: &Session| s.recent_command.as_deref().map(norm_cmd).unwrap_or_default();
+    // Idle sessions by how long they've been idle; busy ones count as 0.
+    let claude_age = |s: &Session| {
+        s.claude.as_ref().map(|c| if c.is_idle() { now_ms.saturating_sub(c.status_since_ms) } else { 0 })
+    };
+    Some(match col {
+        SortCol::Tty => tty_num(&a.tty).cmp(&tty_num(&b.tty)),
+        SortCol::Mem => a.total_mem_kb.cmp(&b.total_mem_kb),
+        SortCol::Delta => a.delta_mem_kb.cmp(&b.delta_mem_kb),
+        SortCol::Cpu => a.total_cpu_pct.total_cmp(&b.total_cpu_pct),
+        SortCol::Procs => a.proc_count.cmp(&b.proc_count),
+        SortCol::Claude => claude_age(a)?.cmp(&claude_age(b)?),
+        SortCol::Tab => {
+            let t = |s: &Session| titles.get(&s.tty).map(|t| t.trim_start_matches(|c: char| !c.is_alphanumeric()).to_lowercase());
+            t(a)?.cmp(&t(b)?)
+        }
+        SortCol::Recent => label(a).cmp(&label(b)),
+        SortCol::Cwd => a.cwd.to_lowercase().cmp(&b.cwd.to_lowercase()),
+    })
+}
+
+fn tty_num(tty: &str) -> u32 {
+    tty.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().unwrap_or(u32::MAX)
+}
+
+/// Sort sessions in place by `col`; rows without a value go last, ties by memory.
+pub fn sort_sessions(sessions: &mut [Session], col: SortCol, desc: bool, titles: &HashMap<String, String>, now_ms: u64) {
+    use std::cmp::Ordering;
+    let has = |s: &Session| match col {
+        SortCol::Claude => s.claude.is_some(),
+        SortCol::Tab => titles.contains_key(&s.tty),
+        _ => true,
+    };
+    sessions.sort_by(|a, b| match (has(a), has(b)) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => b.total_mem_kb.cmp(&a.total_mem_kb),
+        (true, true) => {
+            let o = sort_key_cmp(a, b, col, titles, now_ms).unwrap_or(Ordering::Equal);
+            let o = if desc { o.reverse() } else { o };
+            o.then(b.total_mem_kb.cmp(&a.total_mem_kb)).then(a.tty.cmp(&b.tty))
+        }
+    });
+}
+
+/// State of the bulk "hibernate everything idle N+ days" overlay.
+#[derive(Debug)]
+pub struct BulkUi {
+    pub days: u64,
+    /// Progress / result lines.
+    pub log: Vec<String>,
+    job: Option<std::sync::mpsc::Receiver<BulkMsg>>,
+    pub done: bool,
+}
+
+#[derive(Debug)]
+enum BulkMsg {
+    Line(String),
+    Finished(String),
 }
 
 /// State of the hibernate preview overlay.
@@ -102,6 +216,12 @@ impl Default for App {
             detail_open: false,
             confirm_kill: false,
             hibernate: None,
+            bulk: None,
+            stale_days: 7,
+            sort_col: SortCol::Mem,
+            sort_desc: true,
+            header_cells: Vec::new(),
+            header_y: 0,
             should_quit: false,
             theme: Theme::default(),
             status: None,
@@ -155,7 +275,36 @@ impl App {
             self.total_history.pop_front();
         }
         self.snapshot = Some(snap);
+        self.apply_sort();
+    }
+
+    /// Re-sort the session rows and keep the cursor on the same tty.
+    fn apply_sort(&mut self) {
+        let (col, desc, now) = (self.sort_col, self.sort_desc, now_ms());
+        if let Some(snap) = self.snapshot.as_mut() {
+            let titles = snap.tab_titles.clone();
+            sort_sessions(&mut snap.sessions, col, desc, &titles, now);
+        }
         self.resolve_selection();
+    }
+
+    /// Sort by `col`; choosing the current column again flips the direction.
+    pub fn sort_by(&mut self, col: SortCol) {
+        if self.sort_col == col {
+            self.sort_desc = !self.sort_desc;
+        } else {
+            self.sort_col = col;
+            self.sort_desc = col.default_desc();
+        }
+        self.apply_sort();
+        self.jump_to_top();
+    }
+
+    /// After the user changes the sort, show the top of the new order.
+    fn jump_to_top(&mut self) {
+        if self.item_count() > 0 {
+            self.set_selected(0);
+        }
     }
 
     /// Selectable rows: sessions first, then detached pseudo-sessions.
@@ -243,6 +392,7 @@ impl App {
     /// Advance the animation clock. Call once per event-loop iteration.
     pub fn tick(&mut self) {
         self.poll_hibernate();
+        self.poll_bulk();
         if let Some((start, from, to)) = self.anim {
             let t = start.elapsed().as_secs_f64() * 1000.0 / ANIM_MS;
             if t >= 1.0 {
@@ -263,7 +413,9 @@ impl App {
     /// True while something on screen needs ~30fps: an easing panel, or a
     /// GROWING row whose flag is pulsing.
     pub fn needs_fast_tick(&self) -> bool {
-        if self.hibernate.as_ref().is_some_and(|h| h.job.is_some()) {
+        if self.hibernate.as_ref().is_some_and(|h| h.job.is_some())
+            || self.bulk.as_ref().is_some_and(|b| b.job.is_some())
+        {
             return true;
         }
         if self.anim.is_some() {
@@ -293,6 +445,10 @@ impl App {
         }
         if self.hibernate.is_some() {
             self.handle_hibernate_key(key.code);
+            return;
+        }
+        if self.bulk.is_some() {
+            self.handle_bulk_key(key.code);
             return;
         }
         if self.confirm_kill {
@@ -326,7 +482,126 @@ impl App {
                 }
             }
             KeyCode::Char('H') => self.open_hibernate(),
+            KeyCode::Char('Z') => {
+                self.status = None;
+                self.bulk = Some(BulkUi { days: self.stale_days, log: Vec::new(), job: None, done: false });
+            }
+            KeyCode::Char('s') => {
+                let i = SORT_COLS.iter().position(|&c| c == self.sort_col).unwrap_or(0);
+                let next = SORT_COLS[(i + 1) % SORT_COLS.len()];
+                self.sort_col = next;
+                self.sort_desc = next.default_desc();
+                self.apply_sort();
+                self.jump_to_top();
+            }
+            KeyCode::Char('r') => {
+                self.sort_desc = !self.sort_desc;
+                self.apply_sort();
+                self.jump_to_top();
+            }
             _ => {}
+        }
+    }
+
+    /// Idle Claude sessions at or past `days`, oldest first.
+    pub fn stale_sessions(&self, days: u64) -> Vec<&Session> {
+        let now = now_ms();
+        let limit = days * 86_400_000;
+        let mut v: Vec<&Session> = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.sessions.iter().collect())
+            .unwrap_or_default();
+        v.retain(|s| {
+            s.claude
+                .as_ref()
+                .is_some_and(|c| c.is_idle() && c.status_since_ms > 0 && now.saturating_sub(c.status_since_ms) >= limit)
+        });
+        v.sort_by_key(|s| s.claude.as_ref().map_or(0, |c| c.status_since_ms));
+        v
+    }
+
+    fn handle_bulk_key(&mut self, code: KeyCode) {
+        let Some(b) = self.bulk.as_ref() else { return };
+        if b.job.is_some() {
+            return;
+        }
+        let (days, done) = (b.days, b.done);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => self.bulk = None,
+            _ if done => {}
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if let Some(b) = self.bulk.as_mut() {
+                    b.days += 1;
+                }
+            }
+            KeyCode::Char('-') => {
+                if let Some(b) = self.bulk.as_mut() {
+                    b.days = b.days.saturating_sub(1).max(1);
+                }
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let titles = self.snapshot.as_ref().map(|s| s.tab_titles.clone()).unwrap_or_default();
+                let targets: Vec<Session> = self.stale_sessions(days).into_iter().cloned().collect();
+                if targets.is_empty() {
+                    return;
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let stamp = crate::hibernate::stamp();
+                    let (mut ok, mut skipped, mut freed) = (0, 0, 0u64);
+                    for sess in targets {
+                        let title = titles.get(&sess.tty).cloned().unwrap_or_default();
+                        let res = crate::hibernate::plan(&sess, &title)
+                            .and_then(|plan| crate::hibernate::execute(&plan, &stamp).map(|m| (m, plan.frees_kb)));
+                        let line = match res {
+                            Ok((_, kb)) => {
+                                ok += 1;
+                                freed += kb;
+                                format!("\u{2713} {} {}", sess.tty, short_text(&title, 50))
+                            }
+                            Err(e) => {
+                                skipped += 1;
+                                format!("\u{2717} {} {}", sess.tty, short_text(&e, 70))
+                            }
+                        };
+                        if tx.send(BulkMsg::Line(line)).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = tx.send(BulkMsg::Finished(format!(
+                        "Hibernated {ok} \u{b7} skipped {skipped} \u{b7} freed ~{}",
+                        human_kb(freed)
+                    )));
+                });
+                if let Some(b) = self.bulk.as_mut() {
+                    b.job = Some(rx);
+                    b.log.push("Working through them one at a time\u{2026}".into());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn poll_bulk(&mut self) {
+        let Some(b) = self.bulk.as_mut() else { return };
+        let Some(rx) = &b.job else { return };
+        loop {
+            match rx.try_recv() {
+                Ok(BulkMsg::Line(l)) => b.log.push(l),
+                Ok(BulkMsg::Finished(m)) => {
+                    b.log.push(m.clone());
+                    self.status = Some(m);
+                    b.job = None;
+                    b.done = true;
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => {
+                    b.job = None;
+                    return;
+                }
+            }
         }
     }
 
@@ -406,11 +681,7 @@ impl App {
                     return;
                 }
                 let plan = h.plan.clone();
-                let stamp = std::process::Command::new("date")
-                    .arg("+%b %-d %H:%M")
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
+                let stamp = crate::hibernate::stamp();
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = tx.send(HibJob::Done(crate::hibernate::execute(&plan, &stamp)));
@@ -461,12 +732,19 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
-        if self.confirm_kill || self.hibernate.is_some() {
+        if self.confirm_kill || self.hibernate.is_some() || self.bulk.is_some() {
             return; // overlay is keyboard-only
         }
         match ev.kind {
             MouseEventKind::ScrollUp => self.move_selection(-1),
             MouseEventKind::ScrollDown => self.move_selection(1),
+            MouseEventKind::Down(MouseButton::Left) if ev.row == self.header_y => {
+                if let Some(i) = self.header_cells.iter().position(|&(a, b)| ev.column >= a && ev.column < b) {
+                    if let Some(&col) = SORT_COLS.get(i) {
+                        self.sort_by(col);
+                    }
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 let (x0, x1) = self.table_x;
                 if ev.column < x0 || ev.column >= x1 {
@@ -560,6 +838,109 @@ impl App {
         if self.hibernate.is_some() {
             self.draw_hibernate_overlay(frame, area);
         }
+        if self.bulk.is_some() {
+            self.draw_bulk_overlay(frame, area);
+        }
+    }
+
+    fn draw_bulk_overlay(&self, frame: &mut Frame, area: Rect) {
+        let Some(b) = &self.bulk else { return };
+        let th = self.theme;
+        self.draw_scrim(frame, area);
+        let width = area.width.saturating_sub(4).min(100);
+        let inner = width.saturating_sub(4) as usize;
+        let titles = self.snapshot.as_ref().map(|s| &s.tab_titles);
+        let targets = self.stale_sessions(b.days);
+        let now = now_ms();
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled(
+                format!("\u{1f4a4} Hibernate every Claude session idle {}+ days", b.days),
+                th.modifier(th.fg(MINT), Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+        let mut total = 0u64;
+        let mut eligible = 0usize;
+        if b.log.is_empty() {
+            if targets.is_empty() {
+                lines.push(Line::from(Span::styled("  None. Press - to lower the threshold.", th.dim())));
+            }
+            let room = (area.height as usize).saturating_sub(12);
+            for s in targets.iter().take(room) {
+                let c = s.claude.as_ref().expect("filtered");
+                let blocked = crate::hibernate::blockers(s).filter(|v| !v.is_empty());
+                if blocked.is_none() {
+                    total += s.claude_mem_kb;
+                    eligible += 1;
+                }
+                let title = titles.and_then(|t| t.get(&s.tty)).map(String::as_str).unwrap_or("-");
+                let head = format!(
+                    "  {:<8} idle {:<8} ~{:>8}  ",
+                    s.tty,
+                    fmt_age(now.saturating_sub(c.status_since_ms)),
+                    human_kb(s.claude_mem_kb)
+                );
+                let room_t = inner.saturating_sub(head.chars().count());
+                lines.push(match blocked {
+                    None => Line::from(vec![Span::raw(head), Span::raw(truncate_chars(title, room_t))]),
+                    Some(v) => Line::from(vec![
+                        Span::styled(head, th.dim()),
+                        Span::styled(truncate_chars(&format!("skip: running {}", v.join(", ")), room_t), th.fg(EMBER)),
+                    ]),
+                });
+            }
+            if targets.len() > room {
+                lines.push(Line::from(Span::styled(format!("  \u{2026} and {} more", targets.len() - room), th.dim())));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "{eligible} sessions \u{b7} frees ~{} \u{b7} each gets the same checks and card as H",
+                human_kb(total)
+            )));
+        } else {
+            let room = (area.height as usize).saturating_sub(8);
+            let skip = b.log.len().saturating_sub(room);
+            for l in &b.log[skip..] {
+                let style = if l.starts_with('\u{2717}') { th.fg(EMBER) } else { th.fg(TEXT) };
+                lines.push(Line::from(Span::styled(format!("  {}", truncate_chars(l, inner.saturating_sub(2))), style)));
+            }
+        }
+        lines.push(Line::from(""));
+        let key = |k: &str| {
+            Span::styled(
+                format!(" {k} "),
+                if th.plain() {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(th.color(BASE)).bg(th.color(MINT)).add_modifier(Modifier::BOLD)
+                },
+            )
+        };
+        lines.push(if b.done || b.job.is_some() {
+            Line::from(vec![key("Esc"), Span::raw(if b.done { " close" } else { " (working\u{2026})" })])
+        } else {
+            Line::from(vec![
+                key("+/-"),
+                Span::raw(" days   "),
+                key("y"),
+                Span::raw(" hibernate all   "),
+                key("Esc"),
+                Span::raw(" cancel"),
+            ])
+        });
+        let height = (lines.len() as u16 + 2).min(area.height);
+        let popup = centered_rect(area, width, height);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(if th.plain() { BorderType::Plain } else { BorderType::Rounded })
+                    .border_style(th.fg(MINT))
+                    .title(inset_title("sleep stale sessions", th, MINT))
+                    .style(if th.plain() { Style::default() } else { Style::default().bg(th.color(PANEL)) }),
+            ),
+            popup,
+        );
     }
 
     /// Magnitude of a session's RSS relative to the biggest one on screen.
@@ -768,15 +1149,37 @@ impl App {
             Constraint::Length(9),
             Constraint::Length(6),
             Constraint::Length(5),
-            Constraint::Length(11),
+            Constraint::Length(12),
             Constraint::Fill(3),
             Constraint::Fill(3),
             Constraint::Fill(4),
             Constraint::Length(8),
         ];
-        let header = Row::new(vec![
-            "TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "CLAUDE", "TAB", "SHELL/RECENT", "CWD", "",
-        ])
+        let names = ["TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "CLAUDE", "TAB", "SHELL/RECENT", "CWD"];
+        let mut labels: Vec<String> = names
+            .iter()
+            .zip(SORT_COLS)
+            .map(|(n, c)| {
+                if c == self.sort_col {
+                    format!("{n} {}", if self.sort_desc { "\u{25bc}" } else { "\u{25b2}" })
+                } else {
+                    n.to_string()
+                }
+            })
+            .collect();
+        labels.push(String::new());
+        // Same geometry the table uses, so header clicks map to columns:
+        // inside the border, after the highlight-symbol gutter, 1-col spacing.
+        let gutter = SELECT_MARK.chars().count() as u16;
+        let inner = Rect {
+            x: area.x + 1 + gutter,
+            y: area.y + 1,
+            width: area.width.saturating_sub(2 + gutter),
+            height: 1,
+        };
+        self.header_y = inner.y;
+        self.header_cells = Layout::horizontal(widths).spacing(1).split(inner).iter().map(|r| (r.x, r.x + r.width)).collect();
+        let header = Row::new(labels)
         .style(th.modifier(th.on(MUTED, PANEL), Modifier::BOLD));
 
         let block = Block::bordered()
@@ -1008,7 +1411,9 @@ impl App {
         spans.extend(chip("esc", "collapse"));
         spans.extend(chip("j/k", "move"));
         spans.extend(chip("click", "select"));
+        spans.extend(chip("s/r", "sort"));
         spans.extend(chip("H", "hibernate"));
+        spans.extend(chip("Z", "sleep stale"));
         spans.extend(chip("K", "kill"));
         spans.extend(chip("q", "quit"));
         if let Some(msg) = &self.status {
@@ -1506,8 +1911,8 @@ fn clip(s: &str, width: usize, wide: bool) -> String {
 pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
     let (b, r, d) = if color { (BOLD, RESET, DIM) } else { ("", "", "") };
     let width = output_width();
-    // 10 tty + 10 mem + 9 delta + 6 cpu + 5 procs + 11 claude, one space between each.
-    let fixed = 10 + 10 + 9 + 6 + 5 + 11 + 6;
+    // 10 tty + 10 mem + 9 delta + 6 cpu + 5 procs + 12 claude, one space between each.
+    let fixed = 10 + 10 + 9 + 6 + 5 + 12 + 6;
     let rest = (width.saturating_sub(fixed + 2)).max(48);
     let tab_w = (rest * 34 / 100).clamp(14, 48);
     let lbl_w = (rest * 30 / 100).clamp(18, 44);
@@ -1546,7 +1951,7 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
     }
     lines.push(String::new());
     lines.push(format!(
-        "{}{:<10} {:>10} {:>9} {:>6} {:>5} {:<11} {:<tw$} {:<lw$} {}{}",
+        "{}{:<10} {:>10} {:>9} {:>6} {:>5} {:<12} {:<tw$} {:<lw$} {}{}",
         b,
         "TTY",
         "MEM",
@@ -1571,7 +1976,7 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
         let c = color_for(sess.total_mem_kb);
         let flag = if sess.growing { "   \u{2190} GROWING" } else { "" };
         lines.push(format!(
-            "{}{:<10} {:>10} {:>9} {:>6.1} {:>5} {:<11} {:<tw$} {:<lw$} {}{}{}",
+            "{}{:<10} {:>10} {:>9} {:>6.1} {:>5} {:<12} {:<tw$} {:<lw$} {}{}{}",
             c,
             sess.tty,
             human_kb(sess.total_mem_kb),
@@ -2086,4 +2491,39 @@ mod tests {
         click(&mut app, y0 + 2);
         assert!(!app.detail_open);
     }
+
+    #[test]
+    fn sort_by_claude_idle_keeps_non_claude_last() {
+        use crate::claude::Live;
+        let live = |since, status: &str| Some(Live {
+            pid: 1, session_id: String::new(), name: None, status: status.into(), status_since_ms: since, cmd: "claude".into(),
+        });
+        let mut a = sess("ttys001");
+        a.claude = live(900, "idle"); // idle 100
+        let mut b = sess("ttys002");
+        b.claude = live(100, "idle"); // idle 900
+        let mut c = sess("ttys003");
+        c.claude = live(0, "busy");
+        let d = sess("ttys004"); // no Claude
+        let mut v = vec![d.clone(), a.clone(), c.clone(), b.clone()];
+        let titles = HashMap::new();
+        sort_sessions(&mut v, SortCol::Claude, true, &titles, 1000);
+        assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys002", "ttys001", "ttys003", "ttys004"]);
+        sort_sessions(&mut v, SortCol::Claude, false, &titles, 1000);
+        assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys003", "ttys001", "ttys002", "ttys004"]);
+    }
+
+    #[test]
+    fn sort_by_tab_title_and_tty_number() {
+        let mut v = vec![sess("ttys010"), sess("ttys002"), sess("ttys100")];
+        let titles = HashMap::from([
+            ("ttys010".to_string(), "\u{2733} beta".to_string()),
+            ("ttys100".to_string(), "Alpha".to_string()),
+        ]);
+        sort_sessions(&mut v, SortCol::Tab, false, &titles, 0);
+        assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys100", "ttys010", "ttys002"]);
+        sort_sessions(&mut v, SortCol::Tty, false, &titles, 0);
+        assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys002", "ttys010", "ttys100"]);
+    }
+
 }

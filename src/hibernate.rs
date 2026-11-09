@@ -76,18 +76,36 @@ impl Plan {
     }
 }
 
+/// Processes under the session's Claude that hibernating would end and that
+/// aren't part of Claude itself. `None` if there is no Claude process. Pure.
+pub fn blockers(sess: &Session) -> Option<Vec<String>> {
+    let live = sess.claude.as_ref()?;
+    let ci = sess.procs.iter().position(|p| p.pid == live.pid)?;
+    let d = sess.depths[ci];
+    Some(
+        sess.procs[ci + 1..]
+            .iter()
+            .zip(&sess.depths[ci + 1..])
+            .take_while(|(_, &dd)| dd > d)
+            .filter(|(p, _)| !is_helper(p))
+            .map(|(p, _)| format!("{} (pid {})", crate::app::short_cmd(&p.command, 40), p.pid))
+            .collect(),
+    )
+}
+
+/// "Nov 9 01:40" for cards.
+pub fn stamp() -> String {
+    Command::new("date")
+        .arg("+%b %-d %H:%M")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Build a hibernate plan for a session. Read-only.
 pub fn plan(sess: &Session, title: &str) -> Result<Plan, String> {
     let live = sess.claude.clone().ok_or("No Claude Code session is running in this tab.")?;
-    let ci = sess.procs.iter().position(|p| p.pid == live.pid).ok_or("Claude process not found.")?;
-    let d = sess.depths[ci];
-    let blockers: Vec<String> = sess.procs[ci + 1..]
-        .iter()
-        .zip(&sess.depths[ci + 1..])
-        .take_while(|(_, &dd)| dd > d)
-        .filter(|(p, _)| !is_helper(p))
-        .map(|(p, _)| format!("{} (pid {})", crate::app::short_cmd(&p.command, 40), p.pid))
-        .collect();
+    let blockers = blockers(sess).ok_or("Claude process not found.")?;
 
     let screen = tab_screen(&sess.tty).unwrap_or_default();
 
