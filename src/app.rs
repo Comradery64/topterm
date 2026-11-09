@@ -614,6 +614,11 @@ impl App {
         idx.is_some()
     }
 
+    /// Open the preview with a prepared plan (used by --fake-data screenshots).
+    pub fn show_hibernate_plan(&mut self, plan: crate::hibernate::Plan) {
+        self.hibernate = Some(HibUi { plan, msg: None, job: None });
+    }
+
     /// Open the preview for the selected row, returning the reason if not possible.
     pub fn open_hibernate_preview(&mut self) -> Result<(), String> {
         self.open_hibernate();
@@ -2535,6 +2540,23 @@ mod tests {
         assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys100", "ttys010", "ttys002"]);
         sort_sessions(&mut v, SortCol::Tty, false, &titles, 0);
         assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys002", "ttys010", "ttys100"]);
+    }
+
+
+    #[test]
+    fn bulk_threshold_keys_step_one_day() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new(true);
+        app.on_snapshot(crate::fake::snapshot(crate::fake::STEPS - 1));
+        let press = |app: &mut App, c: char| app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        press(&mut app, 'Z');
+        let days = |app: &App| app.bulk.as_ref().unwrap().days;
+        assert_eq!(days(&app), 7);
+        press(&mut app, '+');
+        assert_eq!(days(&app), 8);
+        press(&mut app, '-');
+        press(&mut app, '-');
+        assert_eq!(days(&app), 6);
     }
 
 }

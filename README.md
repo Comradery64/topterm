@@ -1,35 +1,73 @@
 # topterm
 
-**Activity Monitor for your terminal tabs.** Find which terminal tab is leaking memory — and kill it without restarting anything.
+**Activity Monitor for your terminal tabs, built for people running a lot of AI coding agents.**
+Find which tab is eating your memory, see which Claude Code sessions have been idle for days,
+and put them to sleep without closing the tab or losing the conversation.
 
 ![macOS](https://img.shields.io/badge/platform-macOS-black)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 ![deps](https://img.shields.io/badge/dependencies-3-green)
 
-<img src="assets/demo.svg" alt="topterm TUI" width="100%">
+<img src="assets/demo.svg" alt="topterm TUI: sessions grouped by terminal tab, with a CLAUDE column showing idle time" width="100%">
+
+## Quick guide
+
+| You want to… | Do this |
+|---|---|
+| See which tab is using the most memory | `topterm -t`. Rows are tabs, biggest first. |
+| Find Claude sessions you forgot about | Click the **CLAUDE** header (or press `s` until it's sorted). Longest idle first. |
+| Free one idle session's memory, keep the tab | Select it, press `H`, check the preview, press `y`. |
+| Free every session idle a week or more | Press `Z`, check the list (`+`/`-` change the days), press `y`. |
+| Bring a hibernated session back | Run the `Wake` line printed in its tab: `claude --resume <id>`. |
+| Close tabs without losing track of them | Nothing to do: with `topterm -t` open, the tab map at `~/Library/Application Support/topterm/index.md` refreshes itself every 20 minutes. |
+| See which tab's scrollback is bloating Terminal | `topterm --scrollback` |
+| See duplicate MCP servers | `topterm` (the one-shot table lists them under *MCP servers*). |
+
+Everything is read-only except the actions you confirm (`H`, `Z`, `K`). topterm never closes
+a tab or clears its scrollback.
+
+<table>
+<tr>
+<td width="50%"><img src="assets/hibernate.svg" alt="H: hibernate preview with last ask, Claude's recap, and the tab's screen"><br><sub><b>H</b>: preview before hibernating one session</sub></td>
+<td width="50%"><img src="assets/sleep-stale.svg" alt="Z: list of Claude sessions idle 7+ days"><br><sub><b>Z</b>: hibernate everything idle 7+ days</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="assets/card.svg" alt="The card left in a hibernated tab"><br><sub>What a hibernated tab shows: what it was doing and how to wake it</sub></td>
+</tr>
+</table>
 
 And the one-shot plain table:
 
 ```
-topterm  5 terminal sessions, 641 processes  |  memory 18.54 GB of 16.00 GB physical
+topterm  9 terminal sessions, 702 processes  |  memory 18.54 GB of 16.00 GB physical
 memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM
+swap 9.18 GB of 10.00 GB  ·  internal SSD 8.9 TB written in 21d 4h (~429.92 GB/day)
 
-TTY               MEM      ΔMEM   %CPU PROCS TAB                    SHELL/RECENT        CWD
-ttys004       6.21 GB   +227 MB  188.4     4 ml-training run 42     zsh / python train… /Users/demo/dev/vision-…   ← GROWING
-ttys001       1.38 GB     -3 MB   24.7     4 api-server (dev)       zsh / node server.… /Users/demo/dev/api-ser…
-ttys007        817 MB     -0 MB    9.3     3 docker compose up      zsh / docker compo… /Users/demo/dev/edgecast
-ttys012        514 MB     +1 MB    5.1     2 vite dev server        zsh / vite dev ser… /Users/demo/dev/storefr…
-ttys019         93 MB     +0 MB    0.2     2 -                      zsh                 /Users/demo
+TTY               MEM      ΔMEM   %CPU PROCS CLAUDE       TAB                 SHELL/RECENT       CWD
+ttys004       6.21 GB   +227 MB  188.4     4              ml-training run 42  zsh / python trai… /Users/demo/dev/visi…   ← GROWING
+ttys001       1.38 GB     -3 MB   24.7     4              api-server (dev)    zsh / node server… /Users/demo/dev/api-…
+ttys021       1.15 GB     -2 MB   42.3     5 busy         ✳ Refactor auth mi… zsh / claude       /Users/demo/dev/api-…
+ttys007        817 MB     -0 MB    9.3     3              docker compose up   zsh / docker comp… /Users/demo/dev/edge…
+ttys023        777 MB     -1 MB    0.4     5 idle 2h 14m  ✳ Checkout copy tw… zsh / claude       /Users/demo/dev/stor…
+ttys026        688 MB     -1 MB    0.1     5 idle 9d 5h   ✳ Dataset dedupe s… zsh / claude       /Users/demo/dev/visi…
+ttys031        638 MB     -1 MB    0.1     5 idle 16d 2h  ✳ CDN cache headers zsh / claude       /Users/demo/dev/edge…
+ttys012        514 MB     +1 MB    5.1     2              vite dev server     zsh / vite dev se… /Users/demo/dev/stor…
+ttys019         93 MB     +0 MB    0.2     2              -                   zsh                /Users/demo
 
 terminal emulator apps (scrollback buffers)
 Terminal                1.15 GB    1.9  pid 812  (app itself, not a tab)
+
+MCP servers (every Claude session starts its own copy)
+SERVER                        TABS  PROCS        MEM  ORPHANED
+weather-mcp                      4      8     678 MB  -
+notes-tool mcp                   4      4     207 MB  -
 
 detached (reparented to launchd - no tab to blame, kill by pid)
 pid:6188       650 MB    3.6     1  node /Users/demo/dev/storefront/node_modules/next/dist/server/next-server.js
                                     --port 3000
 ```
 
-<sub>Screenshot and table are real `topterm` output rendered against a synthetic machine (`--fake-data`), so nobody's actual tab titles ship in this repo.</sub>
+<sub>Every screenshot and the table are real `topterm` output rendered against a synthetic machine (`--fake-data`), so nobody's actual tabs, paths, or conversations ship in this repo.</sub>
 
 ## The problem
 
@@ -206,6 +244,21 @@ macOS only for now — the `ps`/`lsof`/`sysctl` invocations and the AppleScript 
 
 **Is the kill feature safe?**
 It SIGTERMs (never SIGKILL) each process group after an explicit per-group confirmation, and the overlay auto-cancels if the target session disappears between refreshes. It will never signal a group it didn't show you first.
+
+## Related tools
+
+topterm isn't the only monitor for AI coding agents. If you mainly want token, cost, or
+context-window tracking per session, look at [abtop](https://terminaltrove.com/abtop/),
+[agentop](https://github.com/dadwadw233/agentop), [agenttop](https://github.com/tech4242/agenttop),
+[clankmon](https://github.com/rydn/clankmon), or [cltop](https://github.com/chrbailey/cltop).
+[clauditor](https://github.com/jarredkenny/clauditor) can pause and resume sessions,
+[RAM Sleeper](https://kejid.github.io/ramsleeper/) unloads idle sessions, and
+[mcp-sprawl-audit](https://github.com/karanb192/mcp-sprawl-audit) counts duplicate MCP servers.
+
+topterm's angle is the terminal tab: it groups *every* process by the tab that owns it (agents,
+dev servers, builds, ssh), attributes Terminal.app's scrollback memory to tabs, measures physical
+footprint rather than RSS, and hibernates a session while leaving its tab, history, and a resume
+card in place.
 
 ## Contributing
 

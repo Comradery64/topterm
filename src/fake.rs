@@ -230,6 +230,44 @@ pub fn snapshot(step: usize) -> Snapshot {
         }],
     );
 
+    // Claude Code sessions: one busy, one recently idle, two long idle
+    // (what `Z` would hibernate). Each runs its own MCP servers.
+    let claude_tab = |tty: &str, cwd: &str, base: u64, pid: i32, cpu: f64, status: &str, idle_ms: u64, name: &str| {
+        let mut s = session(
+            tty,
+            "zsh",
+            Some("claude"),
+            cwd,
+            base,
+            step,
+            Curve::Flat(0.6),
+            cpu,
+            &[
+                Proc { pid: pid - 6, ppid: pid - 10, depth: 0, mem_kb: 38 * MB, cpu_pct: 0.0, etime: "2-01:10:00", command: "-zsh" },
+                Proc { pid, ppid: pid - 6, depth: 1, mem_kb: base - 260 * MB, cpu_pct: cpu, etime: "2-01:09:41", command: "claude" },
+                Proc { pid: pid + 1, ppid: pid, depth: 2, mem_kb: 96 * MB, cpu_pct: 0.0, etime: "2-01:09:39", command: "npm exec @acme/weather-mcp" },
+                Proc { pid: pid + 2, ppid: pid + 1, depth: 3, mem_kb: 74 * MB, cpu_pct: 0.0, etime: "2-01:09:38", command: "node /Users/demo/.npm/_npx/1a2b/node_modules/.bin/weather-mcp" },
+                Proc { pid: pid + 3, ppid: pid, depth: 2, mem_kb: 52 * MB, cpu_pct: 0.0, etime: "2-01:09:39", command: "python3 /Users/demo/.local/bin/notes-tool mcp" },
+            ],
+        );
+        s.claude_mem_kb = s.total_mem_kb.saturating_sub(38 * MB);
+        s.mcp_mem_kb = 222 * MB;
+        s.claude = Some(crate::claude::Live {
+            pid,
+            session_id: format!("{pid:08}-0000-4000-8000-000000000000"),
+            name: Some(name.to_string()),
+            status: status.to_string(),
+            status_since_ms: crate::app::now_ms().saturating_sub(idle_ms),
+            cmd: "claude".to_string(),
+        });
+        s
+    };
+    const H: u64 = 3_600_000;
+    let busy = claude_tab("ttys021", "/Users/demo/dev/api-server", 1180 * MB, 61020, 42.3, "busy", 0, "auth-refactor");
+    let recent = claude_tab("ttys023", "/Users/demo/dev/storefront", 780 * MB, 62030, 0.4, "idle", 2 * H + 14 * 60_000, "checkout-copy");
+    let stale = claude_tab("ttys026", "/Users/demo/dev/vision-lab", 690 * MB, 63040, 0.1, "idle", 9 * 24 * H + 5 * H, "dataset-cleanup");
+    let staler = claude_tab("ttys031", "/Users/demo/dev/edgecast", 640 * MB, 64050, 0.1, "idle", 16 * 24 * H + 2 * H, "cdn-headers");
+
     let emulator = ProcInfo {
         pid: 812,
         ppid: 1,
@@ -241,8 +279,10 @@ pub fn snapshot(step: usize) -> Snapshot {
         command: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal".to_string(),
     };
 
-    let sessions = vec![leak, api, docker, vite, idle];
+    let sessions = vec![leak, api, busy, docker, recent, stale, staler, vite, idle];
     let detached = vec![orphan];
+    let all: Vec<ProcInfo> = sessions.iter().chain(&detached).flat_map(|s| s.procs.clone()).collect();
+    let mcp = crate::collector::mcp_groups(&sessions, &all);
 
     Snapshot {
         total_mem_kb: at(12_680 * MB, step, Curve::Flat(0.8))
@@ -251,18 +291,62 @@ pub fn snapshot(step: usize) -> Snapshot {
         detached,
         emulators: vec![emulator],
         phys_mem_bytes: 16 * GB * 1024,
-        proc_count: 641,
+        proc_count: 702,
         tab_titles: HashMap::from([
             ("ttys004".to_string(), "ml-training run 42".to_string()),
             ("ttys001".to_string(), "api-server (dev)".to_string()),
             ("ttys007".to_string(), "docker compose up".to_string()),
             ("ttys012".to_string(), "vite dev server".to_string()),
+            ("ttys021".to_string(), "\u{2733} Refactor auth middleware".to_string()),
+            ("ttys023".to_string(), "\u{2733} Checkout copy tweaks".to_string()),
+            ("ttys026".to_string(), "\u{2733} Dataset dedupe script".to_string()),
+            ("ttys031".to_string(), "\u{2733} CDN cache headers".to_string()),
         ]),
         tab_title_hint: None,
         taken_at: Instant::now(),
-        system: Default::default(),
-        mcp: Vec::new(),
+        system: crate::collector::System {
+            swap_used_bytes: 9_400 * MB * 1024,
+            swap_total_bytes: 10_240 * MB * 1024,
+            ssd_written_bytes: Some(9_100 * GB * 1024),
+            uptime_secs: 21 * 86_400 + 4 * 3_600,
+        },
+        mcp,
     }
+}
+
+/// A hibernate plan for one of the fake Claude tabs, for screenshots.
+pub fn plan(tty: &str) -> Option<crate::hibernate::Plan> {
+    let snap = snapshot(STEPS - 1);
+    let sess = snap.sessions.iter().find(|s| s.tty == tty)?;
+    let live = sess.claude.clone()?;
+    Some(crate::hibernate::Plan {
+        tty: sess.tty.clone(),
+        title: snap.tab_titles.get(tty).cloned().unwrap_or_default(),
+        cwd: sess.cwd.clone(),
+        frees_kb: sess.claude_mem_kb,
+        live,
+        screen: [
+            "\u{23fa} The dedupe script now hashes rows on (source_url, sha256) and drops",
+            "  exact repeats. On the sample shard it removed 18,402 of 240,113 rows.",
+            "",
+            "  Before I run it on the full dataset (~41 GB), confirm two things:",
+            "  1. Keep the earliest copy of each duplicate, or the newest?",
+            "  2. Write to a new folder (data/clean-v2) or overwrite in place?",
+        ]
+        .iter()
+        .map(|l| l.to_string())
+        .collect(),
+        last_prompt: Some("ok run it on the sample shard first and show me the counts".into()),
+        last_reply: Some("The dedupe script now hashes rows on (source_url, sha256) and drops exact repeats. On the sample shard it removed 18,402 of 240,113 rows.".into()),
+        transcript: None,
+        summary: Some(crate::hibernate::Summary {
+            source: crate::hibernate::Source::Claude,
+            text: "Deduplicating the vision-lab dataset: the script works on a sample shard (18,402 duplicates removed). Waiting on you to choose which copy to keep and where to write the full run.".into(),
+            age_ms: 9 * 86_400_000 + 5 * 3_600_000,
+            messages_since: 0,
+        }),
+        blockers: vec![],
+    })
 }
 
 #[cfg(test)]
