@@ -107,8 +107,11 @@ time with exactly the same checks and card as `H`, showing each result as it goe
 
 ### The tab index
 
-Too many tabs to close safely? `topterm --index` writes a markdown map you can
-keep, so closing a tab never means losing track of it. Tabs are grouped by folder.
+Too many tabs to close safely? topterm keeps a markdown map of every tab at
+`~/Library/Application Support/topterm/index.md`, so closing a tab never means losing
+track of it. You don't run anything: whenever `topterm -t` is open it rebuilds the map at
+launch if it's 20+ minutes old, and again every time it reaches 20 minutes (no model calls).
+The footer shows its age. `topterm --index` prints the same map to stdout on demand. Tabs are grouped by folder.
 (There is no reliable window/tab position to show: with macOS native tabs every tab is its
 own scripting "window", numbered by recent focus.) Per tab:
 

@@ -67,6 +67,41 @@ impl Claude {
 }
 
 pub fn run(summarize: bool) -> io::Result<()> {
+    io::stdout().write_all(build(summarize)?.as_bytes())
+}
+
+/// The auto-maintained index the TUI keeps fresh.
+pub fn auto_path() -> PathBuf {
+    claude::home().join("Library/Application Support/topterm/index.md")
+}
+
+/// Rebuild the auto index if it is missing or older than `max_age`.
+/// Free (no model calls). Written via a temp file + rename so readers never
+/// see half a file. Returns true if it was rebuilt.
+pub fn refresh_if_stale(max_age: std::time::Duration) -> bool {
+    let path = auto_path();
+    let fresh = fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < max_age);
+    if fresh {
+        return false;
+    }
+    let Ok(text) = build(false) else { return false };
+    let Some(dir) = path.parent() else { return false };
+    let _ = fs::create_dir_all(dir);
+    let tmp = dir.join(".index.md.tmp");
+    fs::write(&tmp, text).and_then(|_| fs::rename(&tmp, &path)).is_ok()
+}
+
+/// Age of the auto index, if it exists.
+pub fn auto_age() -> Option<std::time::Duration> {
+    fs::metadata(auto_path()).and_then(|m| m.modified()).ok()?.elapsed().ok()
+}
+
+/// Build the index markdown. Read-only apart from `summarize` model calls.
+pub fn build(summarize: bool) -> io::Result<String> {
     let snap = collector::collect()?;
     let tabs = read_tabs().ok_or_else(|| {
         io::Error::other(
@@ -129,8 +164,7 @@ pub fn run(summarize: bool) -> io::Result<()> {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    let out = render(&rows, &cmds, &summaries, &stamp);
-    io::stdout().write_all(out.as_bytes())
+    Ok(render(&rows, &cmds, &summaries, &stamp))
 }
 
 /// Read every tab's position, tty, title and scrollback tail in one

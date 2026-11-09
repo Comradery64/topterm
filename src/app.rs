@@ -1421,6 +1421,12 @@ impl App {
         spans.extend(chip("Z", "sleep stale"));
         spans.extend(chip("K", "kill"));
         spans.extend(chip("q", "quit"));
+        // One stat() per frame; cheap enough to stay live.
+        let idx = match crate::index::auto_age() {
+            Some(a) => format!("index {}", fmt_age(a.as_millis() as u64)),
+            None => "index building\u{2026}".to_string(),
+        };
+        spans.push(Span::styled(format!(" {idx}"), th.dim()));
         if let Some(msg) = &self.status {
             spans.push(Span::styled(format!(" {msg}"), th.fg(AMBER)));
         }

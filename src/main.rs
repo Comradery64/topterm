@@ -265,6 +265,12 @@ fn run_tui(args: &Args) -> io::Result<()> {
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         let mut app = app::App::new(args.no_color);
         app.stale_days = args.stale_days;
+        // Keep the tab index fresh with no user action: rebuild at launch if
+        // it is 20+ minutes old, then whenever it reaches 20 minutes again.
+        thread::spawn(|| loop {
+            index::refresh_if_stale(Duration::from_secs(20 * 60));
+            thread::sleep(Duration::from_secs(60));
+        });
         loop {
             // Drain any snapshots produced since the last iteration.
             while let Ok(msg) = rx.try_recv() {
