@@ -2258,7 +2258,6 @@ mod tests {
             proc_count: 0,
             tab_titles: HashMap::new(),
             tab_title_hint: None,
-            taken_at: std::time::Instant::now(),
             system: Default::default(),
             mcp: Vec::new(),
         }
@@ -2363,7 +2362,6 @@ mod tests {
             proc_count: 812,
             tab_titles: HashMap::from([("ttys001".to_string(), "claude".to_string())]),
             tab_title_hint: None,
-            taken_at: std::time::Instant::now(),
             system: Default::default(),
             mcp: Vec::new(),
         }

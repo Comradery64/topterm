@@ -77,6 +77,21 @@ You have a MacBook with 18 GB of RAM and your terminal is using 25 GB. Activity 
 
 ## Install
 
+The easy way — an interactive onboarding wizard that checks macOS, Xcode
+Command Line Tools, and Rust, offers to install whatever's missing, then
+walks you through building and linking the binary:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Comradery64/topterm/main/scripts/onboard.sh | bash
+```
+
+(Or, from a clone: `./scripts/onboard.sh`.) It's plain arrow-key/number menus,
+no extra dependencies. It also runs non-interactively for scripting/CI —
+`./scripts/onboard.sh --build-link`, `--build`, `--test`, `--demo`, or
+`--install-rust` each do one thing and exit.
+
+Already have Rust? One line:
+
 ```sh
 cargo install --git https://github.com/Comradery64/topterm
 ```
@@ -85,11 +100,14 @@ That builds and drops the `topterm` binary in `~/.cargo/bin`, which a standard
 `rustup` install already puts on your `PATH` — so `topterm` just works in a new
 shell. (If it doesn't, add `~/.cargo/bin` to your `PATH`.)
 
-Or build from a clone:
+Or build from a clone by hand:
 
 ```sh
 git clone https://github.com/Comradery64/topterm && cd topterm
-cargo build --release
+make setup   # checks macOS, Xcode CLT, and Rust are present; add --install to have
+             # it install the Rust toolchain via rustup if missing:
+             # ./scripts/bootstrap.sh --install
+make build
 ln -s "$PWD/target/release/topterm" ~/.local/bin/topterm
 ```
 

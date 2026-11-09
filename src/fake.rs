@@ -6,7 +6,6 @@
 //! out; `snapshot(step)` is a pure function of `step`.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use crate::collector::{ProcInfo, Session, Snapshot};
 
@@ -303,7 +302,6 @@ pub fn snapshot(step: usize) -> Snapshot {
             ("ttys031".to_string(), "\u{2733} CDN cache headers".to_string()),
         ]),
         tab_title_hint: None,
-        taken_at: Instant::now(),
         system: crate::collector::System {
             swap_used_bytes: 9_400 * MB * 1024,
             swap_total_bytes: 10_240 * MB * 1024,

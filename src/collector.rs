@@ -131,7 +131,6 @@ pub struct Snapshot {
     /// One-line explanation when tab titles could not be read (e.g. the
     /// Automation permission has not been granted).
     pub tab_title_hint: Option<String>,
-    pub taken_at: Instant,
     pub system: System,
     /// MCP servers grouped by name, biggest first.
     pub mcp: Vec<McpGroup>,
@@ -314,7 +313,6 @@ pub fn collect_opts(scrollback: bool) -> io::Result<Snapshot> {
         proc_count,
         tab_titles,
         tab_title_hint,
-        taken_at: Instant::now(),
         system: read_system(),
         mcp,
     })
@@ -561,28 +559,6 @@ fn cached_scrollback() -> HashMap<String, u64> {
         .unwrap_or_default();
     *cache = Some((Instant::now(), m.clone()));
     m
-}
-
-/// Fill `delta_mem_kb` and `growing` on `current` by comparing each
-/// session (and detached subtree, matched by tty / "pid:N" key) against
-/// `previous`. Sessions absent from `previous` keep 0/false.
-pub fn diff_snapshots(current: &mut Snapshot, previous: &Snapshot) {
-    let prev: HashMap<&str, u64> = previous
-        .sessions
-        .iter()
-        .chain(previous.detached.iter())
-        .map(|s| (s.tty.as_str(), s.total_mem_kb))
-        .collect();
-    for s in current
-        .sessions
-        .iter_mut()
-        .chain(current.detached.iter_mut())
-    {
-        if let Some(&p) = prev.get(s.tty.as_str()) {
-            s.delta_mem_kb = s.total_mem_kb as i64 - p as i64;
-            s.growing = s.delta_mem_kb >= GROWING_THRESHOLD_KB as i64;
-        }
-    }
 }
 
 /// Parse raw `ps -axo pid=,ppid=,pgid=,tty=,rss=,%cpu=,etime=,command=`
@@ -1185,35 +1161,6 @@ zsh      700 demo  cwd                             cwd|rtd info error: No such f
                 (700, DELETED_CWD.to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn diff_snapshots_sets_delta_and_growing() {
-        let (sessions, detached, emulators) = group_sessions(parse_ps(PS));
-        let mk = |sessions: Vec<Session>, detached: Vec<Session>| Snapshot {
-            sessions,
-            detached,
-            emulators: emulators.clone(),
-            total_mem_kb: 0,
-            phys_mem_bytes: 0,
-            proc_count: 0,
-            tab_titles: HashMap::new(),
-            tab_title_hint: None,
-            taken_at: Instant::now(),
-            system: Default::default(),
-            mcp: Vec::new(),
-        };
-        let prev = mk(sessions.clone(), detached.clone());
-        let mut cur = mk(sessions, detached);
-        cur.sessions[0].total_mem_kb += GROWING_THRESHOLD_KB; // grew 50 MB
-        cur.detached[0].total_mem_kb -= 1000;
-        diff_snapshots(&mut cur, &prev);
-        assert_eq!(cur.sessions[0].delta_mem_kb, GROWING_THRESHOLD_KB as i64);
-        assert!(cur.sessions[0].growing);
-        assert_eq!(cur.sessions[1].delta_mem_kb, 0);
-        assert!(!cur.sessions[1].growing);
-        assert_eq!(cur.detached[0].delta_mem_kb, -1000);
-        assert!(!cur.detached[0].growing);
     }
 
     #[test]
