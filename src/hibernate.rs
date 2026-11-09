@@ -4,7 +4,7 @@
 //! Split in two so the TUI can show exactly what will happen first:
 //! `plan()` only reads (tab position, on-screen text, last prompt/reply,
 //! cached summary, child processes), and `execute()` re-checks the plan
-//! against the live system, then asks Claude to exit and prints the card.
+//! against the live system, then ends Claude with SIGTERM and prints the card.
 //! It never closes a tab, clears scrollback, or acts on a busy session.
 
 use std::fs;
@@ -17,7 +17,7 @@ use crate::claude::{self, Live};
 use crate::collector::{mcp_name, run_with_timeout, ProcInfo, Session};
 
 const OSA_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long to wait for Claude to exit after being asked.
+/// How long to wait for Claude to exit after SIGTERM.
 const EXIT_WAIT: Duration = Duration::from_secs(15);
 /// Lines of the tab's screen shown in the preview.
 pub const PREVIEW_LINES: usize = 10;
@@ -207,6 +207,11 @@ fn cached_summary(transcript: &Path, id: &str) -> Option<Summary> {
 /// on screen, not the scrollback. Inside AppleScript `contents of x` first
 /// dereferences the loop variable, hence `contents of (contents of t)`.
 fn tab_screen(tty: &str) -> Option<Vec<String>> {
+    screen_raw(tty).map(|l| preview_lines(&l))
+}
+
+/// Every line on the tab's screen, untrimmed of chrome.
+fn screen_raw(tty: &str) -> Option<Vec<String>> {
     let script = format!(
         "tell application \"Terminal\"\n\
          repeat with w in windows\n\
@@ -222,8 +227,25 @@ fn tab_screen(tty: &str) -> Option<Vec<String>> {
     let mut cmd = Command::new("osascript");
     cmd.args(["-e", &script]);
     let (out, _) = run_with_timeout(cmd, OSA_TIMEOUT)?;
-    let lines: Vec<String> = out.strip_prefix('@')?.lines().map(|l| l.trim_end().to_string()).collect();
-    Some(preview_lines(&lines))
+    Some(out.strip_prefix('@')?.lines().map(|l| l.trim_end().to_string()).collect())
+}
+
+fn is_rule(l: &str) -> bool {
+    let t = l.trim_start();
+    t.starts_with('\u{2500}') || t.starts_with('\u{256d}') || t.starts_with('\u{250c}')
+}
+
+/// The text in Claude Code's input box (the last `❯` line plus any lines
+/// before the next rule), or None if no input box is on screen. A leftover
+/// `/exit` from an older topterm counts as empty. Pure.
+pub fn input_text(lines: &[String]) -> Option<String> {
+    let p = lines.iter().rposition(|l| l.trim_start().starts_with('\u{276f}'))?;
+    let first = lines[p].trim_start().trim_start_matches('\u{276f}');
+    let rest = lines[p + 1..].iter().take_while(|l| !is_rule(l)).map(String::as_str);
+    let text: Vec<&str> =
+        std::iter::once(first).chain(rest).map(str::trim).filter(|t| !t.is_empty()).collect();
+    let text = text.join(" ");
+    Some(if text == "/exit" { String::new() } else { text })
 }
 
 /// Lines worth previewing from a tab's screen: the conversation, not Claude
@@ -232,10 +254,6 @@ fn tab_screen(tty: &str) -> Option<Vec<String>> {
 /// found, the last CHROME_FALLBACK lines are dropped. Pure.
 pub fn preview_lines(lines: &[String]) -> Vec<String> {
     const CHROME_FALLBACK: usize = 10;
-    let is_rule = |l: &str| {
-        let t = l.trim_start();
-        t.starts_with('\u{2500}') || t.starts_with('\u{256d}') || t.starts_with('\u{250c}')
-    };
     let prompt = lines.iter().rposition(|l| l.trim_start().starts_with('\u{276f}'));
     let cut = match prompt {
         Some(p) => lines[..p].iter().rposition(|l| is_rule(l)).unwrap_or(p),
@@ -401,11 +419,24 @@ pub fn execute(plan: &Plan, stamp: &str) -> Result<String, String> {
         return Err(format!("Not hibernated: {why}"));
     }
     verify(plan)?;
-    request_exit(plan)?;
+    match screen_raw(&plan.tty).as_deref().map(input_text) {
+        None => return Err("Not hibernated: could not read the tab's screen.".into()),
+        Some(None) => return Err("Not hibernated: Claude's input box isn't on screen (a menu or dialog may be open).".into()),
+        Some(Some(t)) if !t.is_empty() => {
+            return Err(format!("Not hibernated: unsent text in the input box (\"{}\").", crate::app::short_text(&t, 30)))
+        }
+        _ => {}
+    }
+    // SIGTERM, not typed `/exit`: typing lands in whatever the input box
+    // holds (a draft, an autocomplete menu, a compaction in progress). Claude
+    // exits cleanly on SIGTERM and takes its MCP children with it; the
+    // transcript is already on disk.
+    // SAFETY: plain kill(2) on a pid just verified to be this idle session.
+    if unsafe { libc::kill(plan.live.pid, libc::SIGTERM) } != 0 {
+        return Err("Not hibernated: could not signal Claude.".into());
+    }
     if !wait_exit(plan.live.pid, EXIT_WAIT) {
-        return Err(
-            "Claude did not exit within 15s. Nothing else was done; check the tab.".into(),
-        );
+        return Err("Claude did not exit within 15s of SIGTERM; check the tab.".into());
     }
     if !write_to_tty(&plan.tty, &card(plan, stamp, tty_width(&plan.tty))) {
         return Ok(format!(
@@ -416,41 +447,23 @@ pub fn execute(plan: &Plan, stamp: &str) -> Result<String, String> {
     Ok(format!("Hibernated {} · freed ~{}", plan.tty, crate::app::human_kb(plan.frees_kb)))
 }
 
-/// Type `/exit` + Enter into the tab. A pty probe showed Claude Code treats
-/// LF as "insert newline" and only CR as submit, so the command carries an
-/// explicit `return` (CR); whatever newline Terminal appends afterwards
-/// lands on the shell prompt once Claude has exited and is harmless.
-fn request_exit(plan: &Plan) -> Result<(), String> {
-    let script = format!(
-        "tell application \"Terminal\"\n\
-         repeat with w in windows\n\
-         try\n\
-         repeat with t in tabs of w\n\
-         if tty of t is \"/dev/{}\" then\n\
-         do script (\"/exit\" & return) in t\n\
-         return \"ok\"\n\
-         end if\n\
-         end repeat\n\
-         end try\n\
-         end repeat\n\
-         end tell\n\
-         return \"\"",
-        plan.tty
-    );
-    let mut cmd = Command::new("osascript");
-    cmd.args(["-e", &script]);
-    match run_with_timeout(cmd, OSA_TIMEOUT) {
-        Some((o, _)) if o.trim() == "ok" => Ok(()),
-        _ => Err("Not hibernated: could not reach the tab in Terminal.".into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn proc_(pid: i32, cmd: &str) -> ProcInfo {
         ProcInfo { pid, ppid: 0, pgid: 0, tty: None, mem_kb: 0, cpu_pct: 0.0, etime: String::new(), command: cmd.into() }
+    }
+
+    #[test]
+    fn input_box_text() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let rule = "\u{2500}".repeat(20);
+        let r = rule.as_str();
+        assert_eq!(input_text(&l(&["\u{276f} old", "reply", r, "\u{276f} ", r, "status"])), Some("".into()));
+        assert_eq!(input_text(&l(&[r, "\u{276f} fix the", "  build", r])), Some("fix the build".into()));
+        assert_eq!(input_text(&l(&[r, "\u{276f}  /exit", r])), Some("".into()));
+        assert_eq!(input_text(&l(&["no box here"])), None);
     }
 
     #[test]

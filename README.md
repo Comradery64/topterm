@@ -150,9 +150,10 @@ Exit an idle Claude session without closing its tab. Select a row and press `H` 
 
 `y` hibernates. It refuses if Claude is busy or is running anything besides MCP servers,
 language servers, and `caffeinate`, and right before acting it re-checks that the same Claude
-process is still on that tab, on the same conversation, and idle. It then types `/exit` into the
-tab, waits for Claude to quit, and prints a card in the tab with the folder, last ask, summary,
-and the `claude --resume <id>` line. The tab and its history stay. Nothing is done in bulk.
+process is still on that tab, on the same conversation, and idle, and that Claude's input box is
+empty (an unsent draft is never thrown away). It then sends Claude SIGTERM, which exits it cleanly
+along with its MCP servers (nothing is typed into the tab), waits for it to quit, and prints a card in the tab with the folder, last ask, summary,
+and the `claude --resume <id>` line. The tab and its history stay.
 
 ### Hibernate stale sessions (TUI, `Z`)
 
