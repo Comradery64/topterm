@@ -462,7 +462,7 @@ mod tests {
         let sums = HashMap::from([(ID.to_string(), "Did X.".to_string())]);
         let cmds = HashMap::from([(ID2.to_string(), "work".to_string())]);
         let out = render(&rows, &cmds, &sums, "now");
-        assert!(out.contains("## `/a`\n\n### T · ttys001\n- Claude: exited · `claude --resume 0abc"));
+        assert!(out.contains("## `/a`\n\n### T · ttys001\n- Claude: exited · `claude --resume 1111"));
         assert!(out.find("`/a`").unwrap() < out.find("`/b`").unwrap());
         assert!(out.contains("- Summary: Did X.\n"));
         assert!(!out.contains("Window"));
