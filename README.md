@@ -86,8 +86,9 @@ Exit an idle Claude session without closing its tab. Select a row and press `H` 
 
 - folder, session name, idle time, and the memory exiting would free
 - the last prompt you typed and Claude's last reply, read from the transcript
-- the newest cached summary, labelled with its age and how many messages came after it
-  (`S` refreshes it with one Haiku call)
+- Claude's own latest recap from the transcript, or topterm's cached summary if Claude never
+  wrote one, labelled with its source, age, and how many messages came after it
+  (`S` makes a fresh topterm summary with one Haiku call)
 - the last lines currently on that tab's screen
 - `R` brings the tab to the front so you can look before deciding
 
@@ -119,7 +120,10 @@ own scripting "window", numbered by recent focus.) Per tab:
   (`~/.cc-mirror/<name>/config`) are recognised, and their resume command uses
   the variant's own launcher, e.g. `work --resume <id>`
 
-`--summarize` adds one or two sentences per session. Each recap is a one-off
+Every entry includes Claude Code's own recap when the transcript has one (the
+"while you were away" text it writes as an `away_summary` record): free, no model call,
+labelled with its age. `--summarize` fills in only the sessions without one, adding one or
+two sentences per session. Each recap is a one-off
 `claude -p --model haiku --effort low --no-session-persistence` call with tools
 and MCP disabled, fed a trimmed copy of the transcript. It never resumes the
 original session, adds nothing to it, and saves no new session. Recaps are

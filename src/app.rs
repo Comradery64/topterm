@@ -699,7 +699,12 @@ impl App {
         let Some(rx) = &h.job else { return };
         match rx.try_recv() {
             Ok(HibJob::Summary(text)) => {
-                h.plan.summary = Some(crate::hibernate::Summary { text, age_ms: 0, messages_since: 0 });
+                h.plan.summary = Some(crate::hibernate::Summary {
+                    source: crate::hibernate::Source::Topterm,
+                    text,
+                    age_ms: 0,
+                    messages_since: 0,
+                });
                 h.msg = None;
                 h.job = None;
             }
@@ -1476,7 +1481,7 @@ impl App {
                 };
                 lines.push(Line::from(vec![
                     Span::styled("Summary          ", th.dim()),
-                    Span::styled(format!("({when}) "), th.dim()),
+                    Span::styled(format!("({}, {when}) ", s.source.label()), th.dim()),
                 ]));
                 for l in wrap_chars(&short_text(&s.text, 500), inner.saturating_sub(17)).into_iter().take(5) {
                     lines.push(Line::from(format!("                 {l}")));
@@ -1488,7 +1493,7 @@ impl App {
             ])),
         }
         lines.push(Line::from(Span::styled(
-            "                 [S] refresh summary (one Haiku call, ~26k tokens of plan usage)",
+            "                 [S] new topterm summary (one Haiku call, ~26k tokens of plan usage)",
             th.dim(),
         )));
         lines.push(Line::from(""));

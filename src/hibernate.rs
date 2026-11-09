@@ -33,8 +33,27 @@ fn is_helper(p: &ProcInfo) -> bool {
         || (matches!(base, "npm" | "node" | "npx" | "uv" | "uvx") && p.command.to_ascii_lowercase().contains("mcp"))
 }
 
+/// Where a summary came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Claude Code's own recap, read from the transcript (free).
+    Claude,
+    /// topterm's Haiku summary (used when Claude hasn't written a recap).
+    Topterm,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Claude => "Claude's recap",
+            Source::Topterm => "topterm summary",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Summary {
+    pub source: Source,
     pub text: String,
     /// Age of the cached summary in milliseconds.
     pub age_ms: u64,
@@ -119,7 +138,7 @@ pub fn plan(sess: &Session, title: &str) -> Result<Plan, String> {
         .and_then(|p| claude::read_tail(p, 512 * 1024))
         .map(|t| claude::last_exchange(&t))
         .unwrap_or((None, None));
-    let summary = transcript.as_deref().and_then(|p| cached_summary(p, &live.session_id));
+    let summary = transcript.as_deref().and_then(|p| best_summary(p, &live.session_id));
 
     Ok(Plan {
         tty: sess.tty.clone(),
@@ -136,8 +155,21 @@ pub fn plan(sess: &Session, title: &str) -> Result<Plan, String> {
     })
 }
 
-/// The newest cached summary for a session, however stale, with its age and
-/// how many chat messages arrived after it.
+/// Claude's own latest recap if the transcript has one, else topterm's
+/// newest cached summary.
+pub fn best_summary(transcript: &Path, id: &str) -> Option<Summary> {
+    if let Some(r) = claude::latest_recap_in(transcript) {
+        let age_ms = match r.at_ms {
+            0 => 0,
+            t => crate::app::now_ms().saturating_sub(t),
+        };
+        return Some(Summary { source: Source::Claude, text: r.text, age_ms, messages_since: r.messages_since });
+    }
+    cached_summary(transcript, id)
+}
+
+/// The newest cached topterm summary for a session, however stale, with its
+/// age and how many chat messages arrived after it.
 fn cached_summary(transcript: &Path, id: &str) -> Option<Summary> {
     let dir = crate::index::summary_cache_dir();
     let prefix = format!("{id}-");
@@ -167,7 +199,7 @@ fn cached_summary(transcript: &Path, id: &str) -> Option<Summary> {
     } else {
         0
     };
-    Some(Summary { text, age_ms, messages_since })
+    Some(Summary { source: Source::Topterm, text, age_ms, messages_since })
 }
 
 /// The last PREVIEW_LINES non-blank screen lines of the Terminal.app tab on
@@ -333,7 +365,7 @@ pub fn card(plan: &Plan, stamp: &str, width: usize) -> String {
     }
     if let Some(sum) = &plan.summary {
         let when = if sum.age_ms == 0 { "just now".to_string() } else { format!("as of {} ago", fmt_age(sum.age_ms)) };
-        block(&mut out, &format!("Summary ({when})"), &sum.text, 6);
+        block(&mut out, &format!("{} ({when})", sum.source.label()), &sum.text, 6);
         out.push(blank());
     }
     out.push(line(&format!("{DIM}Wake{RESET}     \x1b[1;38;5;79m{}{RESET}", plan.resume_cmd())));

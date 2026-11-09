@@ -16,6 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::claude::{self, find_transcripts, is_uuid};
+use crate::hibernate::Source;
 use crate::collector::{self, run_with_timeout};
 
 /// How much of each tab's scrollback to read when looking for the exit line.
@@ -100,12 +101,28 @@ pub fn run(summarize: bool) -> io::Result<()> {
     let transcripts = find_transcripts(&variants, &ids);
     let cmds: HashMap<String, String> =
         transcripts.iter().map(|(id, (cmd, _))| (id.clone(), cmd.clone())).collect();
-    let summaries = if summarize {
-        let paths = transcripts.into_iter().map(|(id, (_, p))| (id, p)).collect();
-        summarize_all(&ids, paths)
-    } else {
-        HashMap::new()
-    };
+    // Claude's own recaps are free to read, so they are always included.
+    // --summarize fills only the sessions that have none.
+    let now = crate::app::now_ms();
+    let mut summaries: HashMap<String, String> = HashMap::new();
+    let mut missing: HashMap<String, PathBuf> = HashMap::new();
+    for (id, (_, path)) in &transcripts {
+        match claude::latest_recap_in(path) {
+            Some(r) => {
+                let age = if r.at_ms == 0 { String::new() } else { format!(", {} ago", crate::app::fmt_age(now.saturating_sub(r.at_ms))) };
+                summaries.insert(id.clone(), format!("({}{age}) {}", Source::Claude.label(), r.text));
+            }
+            None => {
+                missing.insert(id.clone(), path.clone());
+            }
+        }
+    }
+    if summarize {
+        let want: Vec<String> = ids.iter().filter(|id| missing.contains_key(*id)).cloned().collect();
+        for (id, text) in summarize_all(&want, missing) {
+            summaries.insert(id, format!("({}) {text}", Source::Topterm.label()));
+        }
+    }
 
     let stamp = Command::new("date")
         .arg("+%Y-%m-%d %H:%M")

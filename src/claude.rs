@@ -115,6 +115,68 @@ pub fn last_exchange(raw: &str) -> (Option<String>, Option<String>) {
     (user, reply)
 }
 
+/// Claude Code's own recap: the newest `away_summary` record in a transcript
+/// (the "while you were away" text it shows on return).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recap {
+    pub text: String,
+    /// When Claude wrote it, Unix epoch milliseconds (0 if unparseable).
+    pub at_ms: u64,
+    /// Chat messages added to the transcript after it.
+    pub messages_since: usize,
+}
+
+/// Find the newest recap in transcript text. Pure.
+pub fn latest_recap(raw: &str) -> Option<Recap> {
+    let mut found: Option<Recap> = None;
+    for line in raw.lines() {
+        if line.contains("\"subtype\":\"away_summary\"") {
+            if let Some(text) = json_str(line, "content").filter(|t| !t.trim().is_empty()) {
+                let at_ms = json_str(line, "timestamp").and_then(|t| parse_iso_ms(&t)).unwrap_or(0);
+                found = Some(Recap { text, at_ms, messages_since: 0 });
+            }
+        } else if let Some(r) = found.as_mut() {
+            if is_chat_line(line) {
+                r.messages_since += 1;
+            }
+        }
+    }
+    found
+}
+
+/// A user or assistant message line (tool results included). Pure.
+pub fn is_chat_line(line: &str) -> bool {
+    line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")
+}
+
+/// The newest recap in a transcript file. Recaps are frequent, so the last
+/// 2 MB usually has one; only then is the whole file read.
+pub fn latest_recap_in(path: &Path) -> Option<Recap> {
+    if let Some(r) = read_tail(path, 2 * 1024 * 1024).and_then(|t| latest_recap(&t)) {
+        return Some(r);
+    }
+    latest_recap(&fs::read_to_string(path).ok()?)
+}
+
+/// "2026-11-06T22:02:26.931Z" -> epoch milliseconds (UTC). Pure.
+pub fn parse_iso_ms(s: &str) -> Option<u64> {
+    let (date, time) = s.trim_end_matches('Z').split_once('T')?;
+    let mut d = date.split('-').map(|x| x.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let mut t = time.split(':');
+    let (hh, mm): (i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    let secs: f64 = t.next()?.parse().ok()?;
+    // Days from civil (Howard Hinnant's algorithm).
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let ms = (days * 86_400 + hh * 3600 + mm * 60) * 1000 + (secs * 1000.0) as i64;
+    u64::try_from(ms).ok()
+}
+
 /// Text that lands in the transcript as a "user" message without the user
 /// typing it: messages from other sessions, slash-command echoes, hooks.
 fn is_injected(t: &str) -> bool {
@@ -196,6 +258,20 @@ mod tests {
         assert!(l.is_idle());
         assert_eq!((l.pid, l.status_since_ms, l.cmd.as_str(), l.name), (42, 5, "work", None));
         assert_eq!(parse_live(r#"{"sessionId":"nope"}"#, 1, "claude"), None);
+    }
+
+    #[test]
+    fn recap_newest_wins_and_counts_messages_after() {
+        let raw = r#"{"type":"system","subtype":"away_summary","content":"old","timestamp":"2026-11-06T22:02:26.931Z"}
+{"type":"user","message":{"content":"a"}}
+{"type":"system","subtype":"away_summary","content":"You're fixing tabs.","timestamp":"1970-01-01T00:00:01.500Z"}
+{"type":"user","message":{"content":"b"}}
+{"type":"assistant","message":{"content":[]}}
+{"type":"system","subtype":"turn_duration"}"#;
+        let r = latest_recap(raw).unwrap();
+        assert_eq!((r.text.as_str(), r.at_ms, r.messages_since), ("You're fixing tabs.", 1500, 2));
+        assert_eq!(latest_recap(r#"{"type":"user"}"#), None);
+        assert_eq!(parse_iso_ms("2026-11-06T22:02:26.931Z"), Some(1_794_002_546_931));
     }
 
     #[test]
