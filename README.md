@@ -8,6 +8,33 @@ and put them to sleep without closing the tab or losing the conversation.
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 ![deps](https://img.shields.io/badge/dependencies-3-green)
 
+## Features
+
+**See where memory goes**
+- **One row per terminal tab**, with everything running in it grouped: agents, dev servers, builds, ssh.
+- **Real memory, not RSS.** Uses macOS's `phys_footprint`, so swapped-out memory still counts.
+- **Swap and SSD wear** in the header: swap used, and how much has been written to the internal SSD per day since boot.
+- **Scrollback per tab** (`--scrollback`): which tab's history is bloating Terminal.app.
+- **Duplicate MCP servers**: the same server running once per Claude session, with the total memory.
+- **Leak detection**: a pulsing `GROWING` flag on sessions that gained 50 MB+ recently, plus a memory trend per session.
+
+**Manage Claude Code sessions**
+- **CLAUDE column**: busy or idle, and for how long (`idle 9d 4h`). Sort to find forgotten sessions.
+- **Hibernate one session (`H`)**: preview what it was doing first, then end Claude and keep the tab. A card in the tab shows the folder, last ask, recap and the `claude --resume` line.
+- **Hibernate everything stale (`Z`)**: every session idle 7+ days (adjustable) in one go.
+- **Safe by design**: skips busy sessions, sessions running anything besides MCP or language servers, and sessions with unsent text in the input box. Re-checks everything right before acting.
+- **Go to tab (`o`)**: bring the selected session's Terminal tab to the front.
+
+**Never lose track of a tab**
+- **Tab index**: a markdown map of every tab's folder, Claude session, resume command and recap. It refreshes itself every 20 minutes while the TUI is open.
+- **Uses Claude's own recap** when the session has one; otherwise topterm writes a short summary with Haiku on low effort, which never touches the conversation.
+- **Never closes a tab or clears scrollback.** Everything is read-only except actions you confirm.
+
+**Built for the terminal**
+- **Sort by any column**, by key or by clicking the header. Mouse support throughout.
+- **One-shot table** for scripts and pipes, or the live TUI with `-t`.
+- **Three dependencies**, no daemon, no root.
+
 <img src="assets/demo.svg" alt="topterm TUI: sessions grouped by terminal tab, with a CLAUDE column showing idle time" width="100%">
 
 ## Quick guide
@@ -18,6 +45,7 @@ and put them to sleep without closing the tab or losing the conversation.
 | Find Claude sessions you forgot about | Click the **CLAUDE** header (or press `s` until it's sorted). Longest idle first. |
 | Free one idle session's memory, keep the tab | Select it, press `H`, check the preview, press `y`. |
 | Free every session idle a week or more | Press `Z`, check the list (`+`/`-` change the days), press `y`. |
+| Jump to a session's tab | Select it, press `o`. |
 | Bring a hibernated session back | Run the `Wake` line printed in its tab: `claude --resume <id>`. |
 | Close tabs without losing track of them | Nothing to do: with `topterm -t` open, the tab map at `~/Library/Application Support/topterm/index.md` refreshes itself every 20 minutes. |
 | See which tab's scrollback is bloating Terminal | `topterm --scrollback` |
