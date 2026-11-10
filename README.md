@@ -8,7 +8,44 @@ and put them to sleep without closing the tab or losing the conversation.
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 ![deps](https://img.shields.io/badge/dependencies-3-green)
 
+<img src="assets/search.svg" alt="topterm search: typing /phash narrows the list to the two sessions whose conversations mention it, and p previews the conversation around the match" width="100%">
+
+<sub>Search every open Claude session by what was said in it, then preview that part of the conversation. Rendered from synthetic data.</sub>
+
+## What makes it different
+
+Other agent monitors track tokens and cost per session. topterm is built for a different problem:
+you have dozens of terminal tabs, each with an agent in it, and you've lost track of them.
+
+- **Find a session by what you talked about.** `/` searches the full conversation of every open
+  Claude session (your prompts and Claude's replies, not tool output) in about 0.3s, and `p`
+  shows the conversation around the match. No more opening tabs one by one to find "the one
+  where we fixed the shadow".
+- **Free memory without losing anything.** Hibernate ends an idle Claude session but keeps its tab,
+  its history, and a card saying what it was doing and how to resume it. `Z` does it for every
+  session idle a week or more.
+- **Memory grouped by tab.** Every process in a tab (agent, MCP servers, dev server, build) adds up
+  to one row, measured as real footprint, so you can see which tab is costing you swap.
+- **It never closes a tab.** Everything is read-only except actions you confirm, and every action
+  re-checks the session right before it runs.
+
 ## Features
+
+**Find and navigate**
+- **Full-text search (`/`)**: matches folder, tab title, commands, session name, and anything said
+  in the conversation. Every word must match. The selected row shows the matching line.
+- **Preview a match (`p`)**: the messages around the match, with your search words highlighted.
+  `n`/`N` step through older and newer mentions.
+- **Go to tab (`o`)**: bring the selected session's Terminal tab to the front.
+- **Sort by any column**, by key or by clicking the header. Mouse support throughout.
+
+**Manage Claude Code sessions**
+- **CLAUDE column**: busy or idle, and for how long (`idle 9d 4h`). Sort to find forgotten sessions.
+- **Hibernate one session (`H`)**: preview what it was doing first, then end Claude and keep the
+  tab. A card in the tab shows the folder, last ask, recap and the `claude --resume` line.
+- **Hibernate everything stale (`Z`)**: every session idle 7+ days (adjustable) in one go.
+- **Safe by design**: skips busy sessions, sessions running anything besides MCP or language
+  servers, and sessions with unsent text in the input box.
 
 **See where memory goes**
 - **One row per terminal tab**, with everything running in it grouped: agents, dev servers, builds, ssh.
@@ -18,26 +55,15 @@ and put them to sleep without closing the tab or losing the conversation.
 - **Duplicate MCP servers**: the same server running once per Claude session, with the total memory.
 - **Leak detection**: a pulsing `GROWING` flag on sessions that gained 50 MB+ recently, plus a memory trend per session.
 
-**Manage Claude Code sessions**
-- **CLAUDE column**: busy or idle, and for how long (`idle 9d 4h`). Sort to find forgotten sessions.
-- **Hibernate one session (`H`)**: preview what it was doing first, then end Claude and keep the tab. A card in the tab shows the folder, last ask, recap and the `claude --resume` line.
-- **Hibernate everything stale (`Z`)**: every session idle 7+ days (adjustable) in one go.
-- **Safe by design**: skips busy sessions, sessions running anything besides MCP or language servers, and sessions with unsent text in the input box. Re-checks everything right before acting.
-- **Search (`/`)**: type to filter rows by folder, tab title, command, or session name, and by **anything said in the conversation**: every prompt you typed and every reply from Claude, across all open sessions (about 0.3s for 300 MB of transcripts). Tool output is skipped, so matches mean you talked about it. The selected row shows the matching line.
-- **Preview a match (`p`)**: the conversation around the match, with your search words highlighted. `n`/`N` step through older and newer mentions; `o` jumps to the tab.
-- **Go to tab (`o`)**: bring the selected session's Terminal tab to the front.
-
 **Never lose track of a tab**
-- **Tab index**: a markdown map of every tab's folder, Claude session, resume command and recap. It refreshes itself every 20 minutes while the TUI is open.
-- **Uses Claude's own recap** when the session has one; otherwise topterm writes a short summary with Haiku on low effort, which never touches the conversation.
-- **Never closes a tab or clears scrollback.** Everything is read-only except actions you confirm.
+- **Tab index**: a markdown map of every tab's folder, Claude session, resume command and recap.
+  It refreshes itself every 20 minutes while the TUI is open.
+- **Uses Claude's own recap** when the session has one; otherwise topterm writes a short summary
+  with Haiku on low effort, which never touches the conversation.
 
 **Built for the terminal**
-- **Sort by any column**, by key or by clicking the header. Mouse support throughout.
 - **One-shot table** for scripts and pipes, or the live TUI with `-t`.
 - **Three dependencies**, no daemon, no root.
-
-<img src="assets/demo.svg" alt="topterm TUI: sessions grouped by terminal tab, with a CLAUDE column showing idle time" width="100%">
 
 ## Quick guide
 
@@ -56,6 +82,9 @@ and put them to sleep without closing the tab or losing the conversation.
 
 Everything is read-only except the actions you confirm (`H`, `Z`, `K`). topterm never closes
 a tab or clears its scrollback.
+
+<img src="assets/demo.svg" alt="topterm TUI: sessions grouped by terminal tab, with a CLAUDE column showing idle time" width="100%">
+<sub>The main view: one row per tab, memory, and how long each Claude session has been idle</sub>
 
 <table>
 <tr>

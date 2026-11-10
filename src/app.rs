@@ -503,6 +503,10 @@ impl App {
             .remove(&live.session_id)
             .map(|(_, p)| p);
         let msgs = path.map(|p| crate::search::chat_messages(&p)).unwrap_or_default();
+        self.show_preview(tty, title, msgs, words);
+    }
+
+    fn show_preview(&mut self, tty: String, title: String, msgs: Vec<(bool, String)>, words: Vec<String>) {
         let (matches, pos) = crate::search::match_list(&msgs, &words);
         if matches.is_empty() {
             self.status = Some("this session's chat doesn't mention that".into());
@@ -510,6 +514,34 @@ impl App {
         }
         self.status = None;
         self.preview = Some(PreviewUi { tty, title, msgs, matches, pos, words });
+    }
+
+    /// Search `chats` (tty -> messages) as the full-text scan would and open
+    /// the preview on the first match. For `--demo-search` screenshots.
+    pub fn demo_search(&mut self, query: &str, chats: Vec<(String, Vec<(bool, String)>)>) {
+        let words = crate::search::words(query);
+        self.search = query.to_string();
+        self.ft_query = query.to_string();
+        let ids: HashMap<String, String> = self
+            .raw
+            .iter()
+            .flat_map(|s| s.sessions.iter())
+            .filter_map(|x| x.claude.as_ref().map(|c| (x.tty.clone(), c.session_id.clone())))
+            .collect();
+        for (tty, msgs) in &chats {
+            // Forward order: max_by_key keeps the last maximum, the newest.
+            let best = msgs
+                .iter()
+                .filter_map(|(_, t)| crate::search::match_text(t, &words))
+                .max_by_key(|(hits, _)| *hits);
+            if let (Some(id), Some((_, snip))) = (ids.get(tty), best) {
+                self.ft_hits.insert(id.clone(), snip);
+            }
+        }
+        self.apply_sort();
+        let Some((tty, msgs)) = chats.into_iter().find(|(t, _)| self.select_tty(t)) else { return };
+        let title = self.snapshot.as_ref().and_then(|s| s.tab_titles.get(&tty)).cloned().unwrap_or_default();
+        self.show_preview(tty, title, msgs, words);
     }
 
     fn handle_preview_key(&mut self, code: KeyCode) {

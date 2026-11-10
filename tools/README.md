@@ -16,6 +16,8 @@ python3 tools/capture_frame.py 120 40 /tmp/h.ans $T --fake-data --demo-hibernate
 python3 tools/ansi2svg.py /tmp/h.ans assets/hibernate.svg "topterm — H: hibernate preview"
 python3 tools/capture_frame.py 120 34 /tmp/z.ans $T --fake-data --demo-bulk
 python3 tools/ansi2svg.py /tmp/z.ans assets/sleep-stale.svg "topterm — Z: hibernate sessions idle 7+ days"
+python3 tools/capture_frame.py 120 36 /tmp/s.ans $T --fake-data --demo-search phash
+python3 tools/ansi2svg.py /tmp/s.ans assets/search.svg "topterm — / search: find a session by what was said"
 python3 tools/capture_frame.py 104 24 /tmp/c.ans $T --fake-data --demo-card ttys026
 python3 tools/ansi2svg.py /tmp/c.ans assets/card.svg "topterm — the card left in a hibernated tab"
 ```

@@ -313,6 +313,31 @@ pub fn snapshot(step: usize) -> Snapshot {
 }
 
 /// A hibernate plan for one of the fake Claude tabs, for screenshots.
+/// Synthetic conversations by tty, for the search screenshot.
+pub fn chats() -> Vec<(String, Vec<(bool, String)>)> {
+    let m = |u: bool, t: &str| (u, t.to_string());
+    vec![
+        (
+            "ttys026".into(),
+            vec![
+                m(true, "the training set has a lot of repeated images, can we clean it up?"),
+                m(false, "Yes. There are two kinds: exact copies (same bytes) and near-duplicates (resized or re-encoded). Exact copies are easy with sha256. For near-duplicates I'd use a perceptual hash (phash) and treat a Hamming distance of 6 or less as the same image."),
+                m(true, "do both, but put the phash matches in a review list instead of deleting them"),
+                m(false, "Done. dedupe.py now drops exact repeats and writes phash near-matches to review/near_dupes.csv with both file paths and the distance.\nNothing on the near-match list is deleted; you approve those by hand."),
+                m(true, "ok run it on the sample shard first and show me the counts"),
+                m(false, "On the sample shard it removed 18,402 of 240,113 rows as exact repeats and flagged 3,117 phash pairs for review."),
+            ],
+        ),
+        (
+            "ttys031".into(),
+            vec![
+                m(true, "why are the product images re-downloading every visit?"),
+                m(false, "The CDN sends Cache-Control: no-store on /img. I changed it to max-age=31536000, immutable; filenames already carry a content hash (phash-style suffix), so stale images aren't a risk."),
+            ],
+        ),
+    ]
+}
+
 pub fn plan(tty: &str) -> Option<crate::hibernate::Plan> {
     let snap = snapshot(STEPS - 1);
     let sess = snap.sessions.iter().find(|s| s.tty == tty)?;

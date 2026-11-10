@@ -64,6 +64,9 @@ struct Args {
     /// Render one frame sorted by CLAUDE with the Z overlay open (--demo-bulk).
     /// Undocumented; read-only, never hibernates.
     demo_bulk: bool,
+    /// Render one frame searching the fake machine for this query with the
+    /// match preview open (--demo-search QUERY). Undocumented; fake data only.
+    demo_search: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -79,6 +82,7 @@ fn parse_args() -> Result<Args, String> {
         scrollback: false,
         demo_hibernate: None,
         demo_card: None,
+        demo_search: None,
         stale_days: 7,
         demo_bulk: false,
     };
@@ -101,6 +105,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--demo-card" => {
                 args.demo_card = Some(it.next().ok_or("--demo-card requires a tty")?);
+            }
+            "--demo-search" => {
+                args.demo_search = Some(it.next().ok_or("--demo-search requires a query")?);
             }
             "--demo-hibernate" => {
                 args.demo_hibernate = Some(it.next().ok_or("--demo-hibernate requires a tty")?);
@@ -220,6 +227,21 @@ fn run_demo_bulk(days: u64, fake_data: bool) -> io::Result<()> {
     io::stdout().flush()
 }
 
+/// One frame of a search over the fake machine with the match preview open.
+/// Fake data only: a real run would put someone's conversation in a picture.
+fn run_demo_search(query: &str, fake_data: bool) -> io::Result<()> {
+    if !fake_data {
+        return Err(io::Error::other("--demo-search needs --fake-data"));
+    }
+    let mut app = app::App::new(false);
+    app.on_snapshot(fake::snapshot(fake::STEPS - 1));
+    let (w, h) = crossterm::terminal::size().unwrap_or((120, 40));
+    app.demo_search(query, fake::chats());
+    let buf = app::render_frame(&mut app, w.max(100), h.max(30));
+    print!("{}", app::buffer_to_ansi(&buf));
+    io::stdout().flush()
+}
+
 /// Print the card hibernating `tty` would write, without doing anything.
 fn run_demo_card(tty: &str, fake_data: bool) -> io::Result<()> {
     if fake_data {
@@ -321,7 +343,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = if args.demo_bulk {
+    let result = if let Some(q) = &args.demo_search {
+        run_demo_search(q, args.fake_data)
+    } else if args.demo_bulk {
         run_demo_bulk(args.stale_days, args.fake_data)
     } else if let Some(tty) = &args.demo_card {
         run_demo_card(tty, args.fake_data)

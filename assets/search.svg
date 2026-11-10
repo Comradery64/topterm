@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="964" height="558" viewBox="0 0 964.00 558.00" font-family="'SF Mono','SFMono-Regular',Menlo,Monaco,'Cascadia Mono','DejaVu Sans Mono','Liberation Mono',monospace" font-size="12.5" role="img">
+<rect width="964.00" height="558.00" rx="10.0" fill="#05070a"/>
+<path d="M0 10.0a10.0 10.0 0 0 1 10.0 -10.0h944.00a10.0 10.0 0 0 1 10.0 10.0v20.00H0Z" fill="#11151f"/>
+<rect x="0" y="30.00" width="964.00" height="1" fill="#262e40"/>
+<circle cx="16" cy="15.0" r="4.5" fill="#262e40"/>
+<circle cx="31" cy="15.0" r="4.5" fill="#262e40"/>
+<circle cx="46" cy="15.0" r="4.5" fill="#262e40"/>
+<text x="482.00" y="19.0" text-anchor="middle" font-size="11" fill="#6b7488">topterm — / search: find a session by what was said</text>
+<rect x="10.00" y="38.00" width="944.00" height="512.00" fill="#0b0e14"/>
+<rect x="14.00" y="42.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="56.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="70.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="84.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="98.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="112.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="126.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="140.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="154.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="154.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="154.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="168.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="168.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="168.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="182.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="182.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="182.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="196.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="196.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="196.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="210.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="210.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="210.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="224.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="224.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="224.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="238.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="238.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="238.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="252.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="252.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="252.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="266.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="266.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="266.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="280.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="280.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="280.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="294.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="294.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="294.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="308.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="308.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="308.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="322.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="322.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="322.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="336.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="336.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="336.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="350.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="350.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="350.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="364.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="364.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="364.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="378.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="378.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="378.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="392.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="392.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="392.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="406.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="406.00" width="7.80" height="14.00" fill="#11151f"/>
+<rect x="60.80" y="406.00" width="23.40" height="14.00" fill="#2dd4a7"/>
+<rect x="84.20" y="406.00" width="70.20" height="14.00" fill="#11151f"/>
+<rect x="154.40" y="406.00" width="23.40" height="14.00" fill="#2dd4a7"/>
+<rect x="177.80" y="406.00" width="70.20" height="14.00" fill="#11151f"/>
+<rect x="248.00" y="406.00" width="23.40" height="14.00" fill="#2dd4a7"/>
+<rect x="271.40" y="406.00" width="101.40" height="14.00" fill="#11151f"/>
+<rect x="372.80" y="406.00" width="39.00" height="14.00" fill="#2dd4a7"/>
+<rect x="411.80" y="406.00" width="499.20" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="406.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="420.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="53.00" y="420.00" width="858.00" height="14.00" fill="#11151f"/>
+<rect x="911.00" y="420.00" width="39.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="434.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="448.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="462.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="476.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="490.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="504.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="518.00" width="936.00" height="14.00" fill="#05070a"/>
+<rect x="14.00" y="532.00" width="936.00" height="14.00" fill="#05070a"/>
+<text y="52.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">topterm  │  swap 9.18 GB of 10.00 GB  ·  internal SSD 8.9 TB written in 21d 4h (~429.92 GB/day)                         </tspan></text>
+<text y="66.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">██████████████████████████████████████18.54 GB / 16.00 GB · 2 sessions · 702 procs██████████████████████████████████████</tspan></text>
+<text y="80.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠</tspan></text>
+<text y="94.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">╭╴sessions╶────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</tspan></text>
+<text y="108.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│ TTY        MEM ▼             ΔMEM      %CPU   PROCS CLAUDE       TAB          SHELL/RECENT  CWD                      │</tspan></text>
+<text y="122.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│▍ttys026       688 MB ███████ 0 MB      0.1    5     idle 9d 5h   ✳ Dataset de zsh / claude  /Users/demo/dev/         │</tspan></text>
+<text y="136.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│ ttys031       638 MB ██████▌ 0 MB      0.1    5     idle 16d 2h  ✳ CDN cache  zsh / claude  /Users/demo/dev/         │</tspan></text>
+<text y="150.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│                                                                                                                      │</tspan></text>
+<text y="164.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">╭</tspan><tspan x="60.80" fill="#262e40">╴</tspan><tspan x="68.60" font-weight="700" fill="#2dd4a7">“phash” in this conversation</tspan><tspan x="287.00" fill="#262e40">╶</tspan><tspan x="294.80" fill="#2dd4a7">──────────────────────────────────────────────────────────────────────────────╮</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="178.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80" font-weight="700" fill="#2dd4a7">ttys026 </tspan><tspan x="123.20">✳ Dataset dedupe script</tspan><tspan x="302.60" fill="#6b7488">  match 1 of 4</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="192.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="206.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80" font-weight="700" fill="#2dd4a7">you</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="220.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="76.40" fill="#6b7488">do both, but put the </tspan><tspan x="240.20" font-weight="700" fill="#f5a524">phash</tspan><tspan x="279.20" fill="#6b7488"> matches in a review list instead of deleting them</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="234.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="248.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80" font-weight="700" fill="#f5a524">claude</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="262.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="76.40" fill="#6b7488">Done. dedupe.py now drops exact repeats and writes </tspan><tspan x="474.20" font-weight="700" fill="#f5a524">phash</tspan><tspan x="513.20" fill="#6b7488"> near-matches to review/near_dupes.csv with both</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="276.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="76.40" fill="#6b7488">file paths and the distance.</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="290.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="76.40" fill="#6b7488">Nothing on the near-match list is deleted; you approve those by hand.</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="304.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="318.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80" font-weight="700" fill="#2dd4a7">you</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="332.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="76.40" fill="#6b7488">ok run it on the sample shard first and show me the counts</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="346.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="360.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80" font-weight="700" fill="#f5a524">claude  ◂ match</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="374.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80">  On the sample shard it removed 18,402 of 240,113 rows as exact repeats and flagged 3,117 </tspan><tspan x="770.60" font-weight="700" fill="#f5a524">phash</tspan><tspan x="809.60"> pairs for  </tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="388.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80">  review.                                                                                                   </tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="402.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="416.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">│</tspan><tspan x="60.80" font-weight="700" fill="#0b0e14"> n </tspan><tspan x="84.20"> older   </tspan><tspan x="154.40" font-weight="700" fill="#0b0e14"> N </tspan><tspan x="177.80"> newer   </tspan><tspan x="248.00" font-weight="700" fill="#0b0e14"> o </tspan><tspan x="271.40"> go to tab   </tspan><tspan x="372.80" font-weight="700" fill="#0b0e14"> Esc </tspan><tspan x="411.80"> close                                                         </tspan><tspan x="903.20" fill="#2dd4a7">│</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="430.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│    </tspan><tspan x="53.00" fill="#2dd4a7">╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</tspan><tspan x="911.00" fill="#353b49">    │</tspan></text>
+<text y="444.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│                                                                                                                      │</tspan></text>
+<text y="458.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│                                                                                                                      │</tspan></text>
+<text y="472.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│                                                                                                                      │</tspan></text>
+<text y="486.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">│                                                                                                                      │</tspan></text>
+<text y="500.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</tspan></text>
+<text y="514.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">──╴emulators╶───────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="528.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49">  Terminal               1.15 GB ███████    1.9   pid 812                                                               </tspan></text>
+<text y="542.80" fill="#d7dce5" xml:space="preserve"><tspan x="14.00" fill="#353b49"> /phash 2 matches “…repeats and flagged 3,117 phash pairs for review.”  ↵ expand   esc collapse   j/k move   click selec</tspan></text>
+</svg>
