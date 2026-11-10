@@ -4,6 +4,7 @@
 //! thread + mpsc, and the crossterm/ratatui event loop.
 
 mod app;
+mod cli;
 mod collector;
 mod fake;
 mod hibernate;
@@ -67,6 +68,18 @@ struct Args {
     /// Render one frame searching the fake machine for this query with the
     /// match preview open (--demo-search QUERY). Undocumented; fake data only.
     demo_search: Option<String>,
+    /// Machine-readable output (--json).
+    json: bool,
+    /// Sort column for the snapshot (--sort COL).
+    sort: Option<app::SortCol>,
+    /// Subcommand (search/show/focus/hibernate) and its positional args.
+    cmd: Vec<String>,
+    /// show: --match QUERY.
+    match_query: Option<String>,
+    /// hibernate: --stale [DAYS].
+    stale: Option<u64>,
+    /// hibernate: actually do it (--yes).
+    yes: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -85,10 +98,32 @@ fn parse_args() -> Result<Args, String> {
         demo_search: None,
         stale_days: 7,
         demo_bulk: false,
+        json: false,
+        sort: None,
+        cmd: Vec::new(),
+        match_query: None,
+        stale: None,
+        yes: false,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--json" => args.json = true,
+            "-y" | "--yes" => args.yes = true,
+            "--sort" => {
+                let v = it.next().ok_or("--sort requires a column")?;
+                args.sort = Some(cli::parse_sort(&v).ok_or(format!(
+                    "unknown --sort column: {v} (tty, mem, delta, cpu, procs, idle, tab, recent, cwd)"
+                ))?);
+            }
+            "--match" => args.match_query = Some(it.next().ok_or("--match requires a query")?),
+            "--stale" => {
+                let days = match it.peek() {
+                    Some(v) if v.parse::<u64>().is_ok() => it.next().and_then(|v| v.parse().ok()),
+                    _ => None,
+                };
+                args.stale = Some(days.unwrap_or(args.stale_days).max(1));
+            }
             // --once is the default now; accepted silently for back-compat.
             "--once" => {}
             "-t" | "--tui" => args.tui = true,
@@ -127,9 +162,27 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "topterm — Activity Monitor for terminal sessions\n\n\
-                     USAGE: topterm [-t|--tui] [--interval SECS] [--wide] [--no-color] [--scrollback]\n\
+                     USAGE: topterm [--json] [--sort COL] [--wide] [--no-color] [--scrollback]\n\
+                            topterm -t|--tui [--interval SECS] [--stale-days N]\n\
+                            topterm search QUERY [--json]\n\
+                            topterm show TTY [--match QUERY] [--json]\n\
+                            topterm focus TTY\n\
+                            topterm hibernate (TTY | --stale [DAYS]) [--yes] [--json]\n\
                             topterm --index [--summarize] > tabs.md\n\n\
                      With no flags, prints one plain-text snapshot and exits.\n\n\
+                     Commands (each matches a TUI key):\n\
+                     search QUERY     tabs matching folder, title, command, recap, or anything\n\
+                     \x20                said in a Claude chat (/); exit 1 if none match\n\
+                     show TTY         one tab: processes, resume command, recap, last ask;\n\
+                     \x20                --match QUERY adds the chat messages around matches (p)\n\
+                     focus TTY        bring the tab to the front in Terminal.app (o)\n\
+                     hibernate TTY    end an idle Claude session, keep the tab (H); prints the\n\
+                     \x20                plan only, unless --yes\n\
+                     hibernate --stale [DAYS]  every session idle DAYS+ days, default 7 (Z)\n\n\
+                     Options:\n\
+                     --json           machine-readable output (snapshot, search, show, hibernate)\n\
+                     --sort COL       tty, mem, delta, cpu, procs, idle, tab, recent, cwd\n\
+                     -y, --yes        hibernate: actually do it\n\
                      -t, --tui        launch the interactive TUI instead\n\
                      --interval SECS  sampling interval, only used with --tui (default 2)\n\
                      --wide           print full command lines and cwds, never truncated\n\
@@ -143,6 +196,7 @@ fn parse_args() -> Result<Args, String> {
                 );
                 std::process::exit(0);
             }
+            other if !other.starts_with('-') => args.cmd.push(other.to_string()),
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -162,15 +216,47 @@ fn restore_terminal() {
     let _ = io::stdout().flush();
 }
 
-fn run_once(no_color: bool, wide: bool, fake_data: bool, scrollback: bool) -> io::Result<()> {
-    let snap = if fake_data {
-        fake::snapshot(fake::STEPS - 1)
+fn snapshot(fake_data: bool, scrollback: bool) -> io::Result<collector::Snapshot> {
+    if fake_data {
+        Ok(fake::snapshot(fake::STEPS - 1))
     } else {
-        collector::collect_opts(scrollback)?
-    };
-    let color = !no_color && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
-    println!("{}", app::plain_report(&snap, color, wide));
+        collector::collect_opts(scrollback)
+    }
+}
+
+fn run_once(args: &Args) -> io::Result<()> {
+    let mut snap = snapshot(args.fake_data, args.scrollback)?;
+    if let Some(col) = args.sort {
+        cli::sort(&mut snap, col);
+    }
+    if args.json {
+        println!("{}", cli::snapshot_json(&snap));
+        return Ok(());
+    }
+    let color = !args.no_color && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
+    println!("{}", app::plain_report(&snap, color, args.wide));
     Ok(())
+}
+
+/// Subcommands. Ok(false) means "ran, but nothing matched / something was
+/// skipped" (exit 1); errors exit 2.
+fn run_cmd(args: &Args) -> io::Result<bool> {
+    let usage = |s: &str| io::Error::other(format!("usage: topterm {s} (see --help)"));
+    let rest = &args.cmd[1..];
+    let snap = snapshot(args.fake_data, false)?;
+    match args.cmd[0].as_str() {
+        "search" if !rest.is_empty() => Ok(cli::search(&snap, &rest.join(" "), args.json, args.fake_data)),
+        "search" => Err(usage("search QUERY")),
+        "show" if rest.len() == 1 => cli::show(&snap, &rest[0], args.match_query.as_deref(), args.json, args.fake_data).map(|_| true),
+        "show" => Err(usage("show TTY [--match QUERY]")),
+        "focus" if rest.len() == 1 && !args.fake_data => cli::focus(&snap, &rest[0]).map(|_| true),
+        "focus" => Err(usage("focus TTY")),
+        "hibernate" if rest.len() <= 1 && (rest.len() == 1) != args.stale.is_some() => {
+            cli::hibernate(&snap, rest.first().map(String::as_str), args.stale, args.yes, args.json, args.fake_data)
+        }
+        "hibernate" => Err(usage("hibernate (TTY | --stale [DAYS]) [--yes]")),
+        other => Err(io::Error::other(format!("unknown command: {other} (see --help)"))),
+    }
 }
 
 /// Render exactly one styled frame off-screen and print it as ANSI. Several
@@ -343,6 +429,16 @@ fn main() -> ExitCode {
         }
     };
 
+    if !args.cmd.is_empty() {
+        return match run_cmd(&args) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::from(1),
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let result = if let Some(q) = &args.demo_search {
         run_demo_search(q, args.fake_data)
     } else if args.demo_bulk {
@@ -358,7 +454,7 @@ fn main() -> ExitCode {
     } else if args.tui {
         run_tui(&args)
     } else {
-        run_once(args.no_color, args.wide, args.fake_data, args.scrollback)
+        run_once(&args)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

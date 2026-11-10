@@ -55,7 +55,8 @@ terminal tab, whatever is running in it.
   scrollback size, go-to-tab, and hibernate use Terminal.app.
 
 **Built for the terminal**
-- **One-shot table** for scripts and pipes, or the live TUI with `-t`.
+- **Every TUI action is also a command**, with `--json`, for scripts and AI agents:
+  `search`, `show`, `focus`, `hibernate`. Or run the live TUI with `-t`.
 - **Three dependencies**, no daemon, no root.
 
 ## Quick guide
@@ -273,6 +274,28 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 | `Esc` | collapse / cancel |
 | `q` / `Ctrl-C` | quit |
 
+### Commands (for scripts and agents)
+
+Each command does what one TUI key does. All of them take `--json`.
+
+| Command | TUI key | |
+|---|---|---|
+| `topterm --json` | | the whole snapshot: tabs, agents, idle time, resume commands, VMs, MCP servers |
+| `topterm --sort idle` | `s` | sort by `tty`, `mem`, `delta`, `cpu`, `procs`, `idle`, `tab`, `recent` or `cwd` |
+| `topterm search QUERY` | `/` | tabs matching folder, title, command, recap, or anything said in a Claude chat, with a snippet; exits 1 if none match |
+| `topterm show TTY` | `Enter` | one tab: processes, resume command, recap, last ask and reply |
+| `topterm show TTY --match QUERY` | `p` | adds the chat messages around each match |
+| `topterm focus TTY` | `o` | brings the tab to the front (Terminal.app) |
+| `topterm hibernate TTY` | `H` | shows what would happen; add `--yes` to do it |
+| `topterm hibernate --stale [DAYS]` | `Z` | every Claude session idle DAYS+ days (default 7); add `--yes` to do it |
+
+```sh
+topterm search "image dedupe" --json | jq -r '.[0].tty'   # which tab was doing that?
+topterm hibernate --stale 14                               # dry run: what would go
+```
+
+There's deliberately no `kill` command: an agent shouldn't be able to end your tabs.
+
 ### Flags
 
 | Flag | |
@@ -282,6 +305,9 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 | `--scrollback` | also measure each tab's Terminal.app scrollback (~10s) |
 | `--interval SECS` | TUI sampling interval (default 2) |
 | `--wide` | never truncate commands or paths |
+| `--json` | machine-readable output |
+| `--sort COL` | sort the table (see Commands) |
+| `-y`, `--yes` | `hibernate`: actually do it |
 | `--no-color` | plain output |
 | `--demo-frame` | render one styled TUI frame as ANSI to stdout and exit (used by the test suite to assert on the visuals) |
 | `--index` | print a read-only markdown map of every Terminal.app tab (see above) |
