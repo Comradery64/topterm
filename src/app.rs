@@ -151,7 +151,7 @@ pub const SORT_COLS: [SortCol; 9] = [
 
 impl SortCol {
     /// Numbers start biggest-first; text starts A-Z.
-    fn default_desc(self) -> bool {
+    pub fn default_desc(self) -> bool {
         matches!(self, SortCol::Mem | SortCol::Delta | SortCol::Cpu | SortCol::Procs | SortCol::Claude)
     }
 }
@@ -229,6 +229,39 @@ pub fn session_matches(sess: &Session, title: Option<&String>, extra: Option<&St
         hay.push_str(e);
     }
     query.to_lowercase().split_whitespace().all(|w| hay.contains(w))
+}
+
+/// Each Claude session's recap and last ask, lowercased, by session id:
+/// the extra text `session_matches` searches. Reads transcripts.
+pub fn search_extras(ids: &[String]) -> HashMap<String, String> {
+    let variants = crate::claude::variants(&crate::claude::home());
+    let mut out = HashMap::new();
+    for (id, (_, path)) in crate::claude::find_transcripts(&variants, ids) {
+        let mut t = crate::hibernate::best_summary(&path, &id).map(|s| s.text).unwrap_or_default();
+        if let Some(ask) = crate::claude::read_tail(&path, 512 * 1024).and_then(|raw| crate::claude::last_exchange(&raw).0) {
+            t.push(' ');
+            t.push_str(&ask);
+        }
+        out.insert(id, t.to_lowercase());
+    }
+    out
+}
+
+/// Session id -> snippet, for every session whose chat contains all words
+/// of `query`. Stops early (partial result) once `cancelled` returns true.
+pub fn full_text_hits(ids: &[String], query: &str, cancelled: &dyn Fn() -> bool) -> HashMap<String, String> {
+    let words = crate::search::words(query);
+    let variants = crate::claude::variants(&crate::claude::home());
+    let mut hits = HashMap::new();
+    for (id, (_, path)) in crate::claude::find_transcripts(&variants, ids) {
+        if cancelled() {
+            break;
+        }
+        if let Some(snip) = crate::search::search_transcript(&path, &words, cancelled) {
+            hits.insert(id, snip);
+        }
+    }
+    hits
 }
 
 fn tty_num(tty: &str) -> u32 {
@@ -409,19 +442,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.search_job = Some(rx);
         std::thread::spawn(move || {
-            let variants = crate::claude::variants(&crate::claude::home());
-            let mut out = HashMap::new();
-            for (id, (_, path)) in crate::claude::find_transcripts(&variants, &ids) {
-                let mut t = crate::hibernate::best_summary(&path, &id).map(|s| s.text).unwrap_or_default();
-                if let Some(ask) = crate::claude::read_tail(&path, 512 * 1024)
-                    .and_then(|raw| crate::claude::last_exchange(&raw).0)
-                {
-                    t.push(' ');
-                    t.push_str(&ask);
-                }
-                out.insert(id, t.to_lowercase());
-            }
-            let _ = tx.send(out);
+            let _ = tx.send(search_extras(&ids));
         });
     }
 
@@ -450,18 +471,10 @@ impl App {
         self.ft_job = Some(rx);
         std::thread::spawn(move || {
             let cancelled = || gen.load(std::sync::atomic::Ordering::Relaxed) != mine;
-            let words = crate::search::words(&query);
-            let variants = crate::claude::variants(&crate::claude::home());
-            let mut hits = HashMap::new();
-            for (id, (_, path)) in crate::claude::find_transcripts(&variants, &ids) {
-                if cancelled() {
-                    return;
-                }
-                if let Some(snip) = crate::search::search_transcript(&path, &words, &cancelled) {
-                    hits.insert(id, snip);
-                }
+            let hits = full_text_hits(&ids, &query, &cancelled);
+            if !cancelled() {
+                let _ = tx.send((query, hits));
             }
-            let _ = tx.send((query, hits));
         });
     }
 
