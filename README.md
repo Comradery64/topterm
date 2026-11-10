@@ -208,6 +208,7 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 | click / `↑↓` / `j k` | select session |
 | `Enter` / click again | expand / collapse detail |
 | `s` / `r` / click a header | sort by that column / reverse (click the same header again to reverse) |
+| `o` | bring the selected session's Terminal tab to the front |
 | `Z` | hibernate every Claude session idle 7+ days (`+`/`-` adjust, `y` run) |
 | `H` | hibernate preview for the selected Claude session (`R` reveal, `S` summary, `y` hibernate) |
 | `K` then `y` | SIGTERM every process group in the session |

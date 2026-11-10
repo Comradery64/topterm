@@ -482,6 +482,13 @@ impl App {
                 }
             }
             KeyCode::Char('H') => self.open_hibernate(),
+            KeyCode::Char('o') => {
+                if let Some(tty) = self.selected_session().map(|s| s.tty.clone()) {
+                    self.status = Some(format!("bringing {tty} to the front\u{2026}"));
+                    // AppleScript can take seconds with 100+ tabs; don't block the UI.
+                    std::thread::spawn(move || crate::hibernate::reveal(&tty));
+                }
+            }
             KeyCode::Char('Z') => {
                 self.status = None;
                 self.bulk = Some(BulkUi { days: self.stale_days, log: Vec::new(), job: None, done: false });
@@ -1422,6 +1429,7 @@ impl App {
         spans.extend(chip("j/k", "move"));
         spans.extend(chip("click", "select"));
         spans.extend(chip("s/r", "sort"));
+        spans.extend(chip("o", "go to tab"));
         spans.extend(chip("H", "hibernate"));
         spans.extend(chip("Z", "sleep stale"));
         spans.extend(chip("K", "kill"));
