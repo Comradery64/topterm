@@ -310,6 +310,17 @@ pub fn snapshot(step: usize) -> Snapshot {
     let detached = vec![orphan];
     let all: Vec<ProcInfo> = sessions.iter().chain(&detached).flat_map(|s| s.procs.clone()).collect();
     let mcp = crate::collector::mcp_groups(&sessions, &all);
+    let vm = ProcInfo {
+        pid: 30944,
+        ppid: 1,
+        pgid: 30944,
+        tty: None,
+        mem_kb: at(3_420 * MB, step, Curve::Flat(1.1)),
+        cpu_pct: 4.2,
+        etime: "03:03:10".to_string(),
+        command: "/System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine".to_string(),
+    };
+    let vms = crate::collector::find_vms(&[all, vec![vm]].concat());
 
     Snapshot {
         total_mem_kb: at(12_680 * MB, step, Curve::Flat(0.8))
@@ -317,6 +328,7 @@ pub fn snapshot(step: usize) -> Snapshot {
         sessions,
         detached,
         emulators: vec![emulator],
+        vms,
         phys_mem_bytes: 16 * GB * 1024,
         proc_count: 702,
         tab_titles: HashMap::from([

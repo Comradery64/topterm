@@ -134,6 +134,16 @@ pub struct Snapshot {
     pub system: System,
     /// MCP servers grouped by name, biggest first.
     pub mcp: Vec<McpGroup>,
+    /// Virtual machines (Docker, OrbStack, UTM, ...), biggest first.
+    pub vms: Vec<Vm>,
+}
+
+/// A virtual machine process. Its guest's RAM is charged here, to no tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vm {
+    /// e.g. "Docker Desktop VM", or "VM (Docker Desktop or OrbStack)".
+    pub label: String,
+    pub proc: ProcInfo,
 }
 
 /// Session RSS growth flag threshold (50 MB in KB).
@@ -216,6 +226,59 @@ const EMULATOR_MARKERS: &[&str] = &[
     "Ghostty.app/Contents/MacOS/ghostty",
 ];
 
+/// Command-line markers of processes that run a VM's guest, with the app
+/// they imply ("" when the process alone doesn't say whose VM it is).
+const VM_MARKERS: &[(&str, &str)] = &[
+    ("com.apple.Virtualization.VirtualMachine", ""),
+    ("qemu-system-", ""),
+    ("vfkit", ""),
+    ("krunkit", ""),
+    ("com.docker.krun", "Docker Desktop"),
+    ("com.docker.virtualization", "Docker Desktop"),
+    ("prl_vm_app", "Parallels"),
+    ("vmware-vmx", "VMware Fusion"),
+];
+
+/// Markers of running apps that start VMs, used to name an anonymous one
+/// (Apple's Virtualization process doesn't show who launched it).
+const VM_APPS: &[(&str, &str)] = &[
+    ("com.docker.backend", "Docker Desktop"),
+    ("OrbStack.app/", "OrbStack"),
+    ("UTM.app/", "UTM"),
+    ("Rancher Desktop.app/", "Rancher Desktop"),
+    ("colima", "Colima"),
+    ("limactl", "Lima"),
+    ("podman", "Podman"),
+    ("tart ", "Tart"),
+];
+
+/// Find VM processes and name them. Pure.
+pub fn find_vms(procs: &[ProcInfo]) -> Vec<Vm> {
+    let mut apps: Vec<&str> = Vec::new();
+    for p in procs {
+        for (m, app) in VM_APPS {
+            if p.command.contains(m) && !apps.contains(app) {
+                apps.push(app);
+            }
+        }
+    }
+    let mut vms: Vec<Vm> = procs
+        .iter()
+        .filter_map(|p| {
+            let (_, known) = VM_MARKERS.iter().find(|(m, _)| p.command.contains(m))?;
+            let label = match (known.is_empty(), apps.as_slice()) {
+                (false, _) => format!("{known} VM"),
+                (true, [one]) => format!("{one} VM"),
+                (true, []) => "VM (app unknown)".to_string(),
+                (true, many) => format!("VM ({})", many.join(" or ")),
+            };
+            Some(Vm { label, proc: p.clone() })
+        })
+        .collect();
+    vms.sort_by_key(|v| std::cmp::Reverse(v.proc.mem_kb));
+    vms
+}
+
 /// Dev-tool basenames whose launchd-reparented subtrees are worth listing.
 const ORPHAN_HINTS: &[&str] = &[
     "node", "claude", "python", "python3", "ruby", "java", "deno", "bun",
@@ -265,6 +328,7 @@ pub fn collect_opts(scrollback: bool) -> io::Result<Snapshot> {
         attach_claude(s, &variants);
     }
     let mcp = mcp_groups(&sessions, &all_procs);
+    let vms = find_vms(&all_procs);
     if scrollback {
         let chars = cached_scrollback();
         for s in &mut sessions {
@@ -315,6 +379,7 @@ pub fn collect_opts(scrollback: bool) -> io::Result<Snapshot> {
         tab_title_hint,
         system: read_system(),
         mcp,
+        vms,
     })
 }
 
@@ -1219,6 +1284,21 @@ zsh      700 demo  cwd                             cwd|rtd info error: No such f
         let g = mcp_groups(&[a, b], &all);
         assert_eq!(g.len(), 1);
         assert_eq!((g[0].procs, g[0].tabs, g[0].mem_kb, g[0].orphaned, g[0].orphaned_mem_kb), (4, 2, 650, 1, 50));
+    }
+
+    #[test]
+    fn vms_are_named_by_the_app_that_runs_them() {
+        let p = |pid, cmd: &str, kb| ProcInfo {
+            pid, ppid: 1, pgid: pid, tty: None, mem_kb: kb, cpu_pct: 0.0, etime: "1".into(), command: cmd.into(),
+        };
+        let vz = "/System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine";
+        let docker = p(2, "/Applications/Docker.app/Contents/MacOS/com.docker.backend services", 300);
+        let orb = p(3, "/Applications/OrbStack.app/Contents/MacOS/OrbStack", 200);
+        let labels = |procs: &[ProcInfo]| find_vms(procs).into_iter().map(|v| v.label).collect::<Vec<_>>();
+        assert_eq!(labels(&[p(1, vz, 8_000), docker.clone()]), ["Docker Desktop VM"]);
+        assert_eq!(labels(&[p(1, vz, 8_000), docker, orb]), ["VM (Docker Desktop or OrbStack)"]);
+        assert_eq!(labels(&[p(1, vz, 8_000)]), ["VM (app unknown)"]);
+        assert_eq!(labels(&[p(1, "zsh", 9), p(4, "vmware-vmx -x a.vmx", 5), p(5, "qemu-system-aarch64 -m 4G", 7)]), ["VM (app unknown)", "VMware Fusion VM"]);
     }
 
     #[test]

@@ -36,6 +36,8 @@ terminal tab, whatever is running in it.
 - **Real memory, not RSS.** Uses macOS's `phys_footprint`, so swapped-out memory still counts.
 - **Leak detection**: a pulsing `GROWING` flag on tabs that gained 50 MB+ recently, plus a memory trend per tab.
 - **Duplicate MCP servers**: each agent session starts its own copy; topterm totals them and flags orphans.
+- **Virtual machines**: Docker Desktop, OrbStack, UTM, Colima, Parallels and other VMs get their own row,
+  since their memory belongs to no tab.
 - **Swap and SSD wear** in the header: swap used, and how much is written to the internal SSD per day.
 - **Search (`/`)** by folder, tab title, or command. **Go to tab (`o`)** brings it to the front.
 - **Sort by any column**, by key or by clicking the header. **Kill (`K`)** a tab's processes after a confirmation.
@@ -110,6 +112,9 @@ ttys019         93 MB     +0 MB    0.2     2              -                   zs
 
 terminal emulator apps (scrollback buffers)
 Terminal                1.15 GB    1.9  pid 812  (app itself, not a tab)
+
+virtual machines (guest memory, not owned by any tab)
+Docker Desktop VM               3.32 GB    4.2  pid 30944
 
 MCP servers (every agent session starts its own copy)
 SERVER                        TABS  PROCS        MEM  ORPHANED
