@@ -85,6 +85,17 @@ pub struct App {
     /// Header cell x ranges from the last draw, for click-to-sort.
     header_cells: Vec<(u16, u16)>,
     header_y: u16,
+    /// Row filter typed after `/`; empty means no filter.
+    pub search: String,
+    /// True while the filter is being typed.
+    pub search_typing: bool,
+    /// Unfiltered rows from the last snapshot; `snapshot` holds the
+    /// filtered, sorted view.
+    raw: Option<Snapshot>,
+    /// Per Claude session id: lowercased recap and last ask, for search.
+    search_text: HashMap<String, String>,
+    search_job: Option<std::sync::mpsc::Receiver<HashMap<String, String>>>,
+    search_loaded: Option<Instant>,
 }
 
 /// Table column the rows are sorted by.
@@ -150,6 +161,27 @@ pub fn sort_key_cmp(
         SortCol::Recent => label(a).cmp(&label(b)),
         SortCol::Cwd => a.cwd.to_lowercase().cmp(&b.cwd.to_lowercase()),
     })
+}
+
+/// True if every word of `query` appears (case-insensitive) in the
+/// session's tty, folder, tab title, commands, Claude session name, or
+/// `extra` (its recap and last ask, already lowercased). Pure.
+pub fn session_matches(sess: &Session, title: Option<&String>, extra: Option<&String>, query: &str) -> bool {
+    let mut hay = format!("{} {} {}", sess.tty, sess.cwd, title.map_or("", |t| t.as_str()));
+    if let Some(c) = &sess.claude {
+        hay.push(' ');
+        hay.push_str(c.name.as_deref().unwrap_or(""));
+    }
+    for p in &sess.procs {
+        hay.push(' ');
+        hay.push_str(&p.command);
+    }
+    let mut hay = hay.to_lowercase();
+    if let Some(e) = extra {
+        hay.push(' ');
+        hay.push_str(e);
+    }
+    query.to_lowercase().split_whitespace().all(|w| hay.contains(w))
 }
 
 fn tty_num(tty: &str) -> u32 {
@@ -222,6 +254,12 @@ impl Default for App {
             sort_desc: true,
             header_cells: Vec::new(),
             header_y: 0,
+            search: String::new(),
+            search_typing: false,
+            raw: None,
+            search_text: HashMap::new(),
+            search_job: None,
+            search_loaded: None,
             should_quit: false,
             theme: Theme::default(),
             status: None,
@@ -274,18 +312,101 @@ impl App {
         while self.total_history.len() > HISTORY_LEN {
             self.total_history.pop_front();
         }
-        self.snapshot = Some(snap);
+        self.raw = Some(snap);
         self.apply_sort();
     }
 
-    /// Re-sort the session rows and keep the cursor on the same tty.
+    /// Rebuild the visible rows from the raw snapshot: filter by the
+    /// search, sort, and keep the cursor on the same tty.
     fn apply_sort(&mut self) {
         let (col, desc, now) = (self.sort_col, self.sort_desc, now_ms());
-        if let Some(snap) = self.snapshot.as_mut() {
-            let titles = snap.tab_titles.clone();
-            sort_sessions(&mut snap.sessions, col, desc, &titles, now);
+        if let Some(raw) = &self.raw {
+            let mut snap = raw.clone();
+            if !self.search.trim().is_empty() {
+                let (q, text) = (&self.search, &self.search_text);
+                let keep = |x: &Session| {
+                    let extra = x.claude.as_ref().and_then(|c| text.get(&c.session_id));
+                    session_matches(x, raw.tab_titles.get(&x.tty), extra, q)
+                };
+                snap.sessions.retain(|x| keep(x));
+                snap.detached.retain(|x| keep(x));
+            }
+            sort_sessions(&mut snap.sessions, col, desc, &snap.tab_titles, now);
+            self.snapshot = Some(snap);
         }
         self.resolve_selection();
+    }
+
+    /// Load each Claude session's recap and last ask in the background so
+    /// search can match on what a session was about. Reloads at most every
+    /// five minutes.
+    fn start_search_load(&mut self) {
+        if self.search_job.is_some() || self.search_loaded.is_some_and(|t| t.elapsed() < Duration::from_secs(300)) {
+            return;
+        }
+        let ids: Vec<String> = self
+            .raw
+            .iter()
+            .flat_map(|s| s.sessions.iter())
+            .filter_map(|x| x.claude.as_ref().map(|c| c.session_id.clone()))
+            .collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.search_job = Some(rx);
+        std::thread::spawn(move || {
+            let variants = crate::claude::variants(&crate::claude::home());
+            let mut out = HashMap::new();
+            for (id, (_, path)) in crate::claude::find_transcripts(&variants, &ids) {
+                let mut t = crate::hibernate::best_summary(&path, &id).map(|s| s.text).unwrap_or_default();
+                if let Some(ask) = crate::claude::read_tail(&path, 512 * 1024)
+                    .and_then(|raw| crate::claude::last_exchange(&raw).0)
+                {
+                    t.push(' ');
+                    t.push_str(&ask);
+                }
+                out.insert(id, t.to_lowercase());
+            }
+            let _ = tx.send(out);
+        });
+    }
+
+    fn poll_search(&mut self) {
+        let Some(rx) = &self.search_job else { return };
+        match rx.try_recv() {
+            Ok(m) => {
+                self.search_text = m;
+                self.search_job = None;
+                self.search_loaded = Some(Instant::now());
+                if !self.search.is_empty() {
+                    self.apply_sort();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.search_job = None,
+            Err(_) => {}
+        }
+    }
+
+    fn handle_search_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.search.clear();
+                self.search_typing = false;
+                self.apply_sort();
+            }
+            KeyCode::Enter => self.search_typing = false,
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::Up => self.move_selection(-1),
+            KeyCode::Backspace => {
+                self.search.pop();
+                self.apply_sort();
+                self.jump_to_top();
+            }
+            KeyCode::Char(c) => {
+                self.search.push(c);
+                self.apply_sort();
+                self.jump_to_top();
+            }
+            _ => {}
+        }
     }
 
     /// Sort by `col`; choosing the current column again flips the direction.
@@ -393,6 +514,7 @@ impl App {
     pub fn tick(&mut self) {
         self.poll_hibernate();
         self.poll_bulk();
+        self.poll_search();
         if let Some((start, from, to)) = self.anim {
             let t = start.elapsed().as_secs_f64() * 1000.0 / ANIM_MS;
             if t >= 1.0 {
@@ -415,6 +537,7 @@ impl App {
     pub fn needs_fast_tick(&self) -> bool {
         if self.hibernate.as_ref().is_some_and(|h| h.job.is_some())
             || self.bulk.as_ref().is_some_and(|b| b.job.is_some())
+            || self.search_job.is_some()
         {
             return true;
         }
@@ -464,8 +587,17 @@ impl App {
             }
             return;
         }
+        if self.search_typing {
+            self.handle_search_key(key.code);
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('/') => {
+                self.search_typing = true;
+                self.status = None;
+                self.start_search_load();
+            }
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Enter => {
@@ -474,7 +606,14 @@ impl App {
                     self.set_detail(open);
                 }
             }
-            KeyCode::Esc => self.set_detail(false),
+            KeyCode::Esc => {
+                if !self.detail_open && !self.search.is_empty() {
+                    self.search.clear();
+                    self.apply_sort();
+                } else {
+                    self.set_detail(false);
+                }
+            }
             KeyCode::Char('K') => {
                 if self.selected_session().is_some() {
                     self.confirm_kill = true;
@@ -515,7 +654,7 @@ impl App {
         let now = now_ms();
         let limit = days * 86_400_000;
         let mut v: Vec<&Session> = self
-            .snapshot
+            .raw
             .as_ref()
             .map(|s| s.sessions.iter().collect())
             .unwrap_or_default();
@@ -1424,10 +1563,23 @@ impl App {
             ]
         };
         let mut spans = vec![Span::raw(" ")];
+        if self.search_typing || !self.search.is_empty() {
+            let cursor = if self.search_typing { "\u{258f}" } else { "" };
+            spans.push(Span::styled(format!("/{}{cursor} ", self.search), th.modifier(th.fg(MINT), Modifier::BOLD)));
+            let loading = if self.search_job.is_some() { " \u{b7} loading recaps\u{2026}" } else { "" };
+            spans.push(Span::styled(format!("{} match{}{loading} ", self.item_count(), if self.item_count() == 1 { "" } else { "es" }), th.dim()));
+            if self.search_typing {
+                spans.extend(chip("\u{21b5}", "done"));
+                spans.extend(chip("esc", "clear"));
+                frame.render_widget(Paragraph::new(Line::from(spans)), area);
+                return;
+            }
+        }
         spans.extend(chip("\u{21b5}", "expand"));
         spans.extend(chip("esc", "collapse"));
         spans.extend(chip("j/k", "move"));
         spans.extend(chip("click", "select"));
+        spans.extend(chip("/", "search"));
         spans.extend(chip("s/r", "sort"));
         spans.extend(chip("o", "go to tab"));
         spans.extend(chip("H", "hibernate"));
@@ -2548,6 +2700,45 @@ mod tests {
         assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys002", "ttys010", "ttys100"]);
     }
 
+
+    #[test]
+    fn search_matches_every_word_anywhere() {
+        let mut s = sess("ttys004");
+        s.cwd = "/Users/demo/dev/Storefront".into();
+        let title = "vite dev".to_string();
+        let extra = "fixing the checkout flow".to_string();
+        assert!(session_matches(&s, Some(&title), None, "store VITE"));
+        assert!(session_matches(&s, None, Some(&extra), "checkout ttys004"));
+        assert!(!session_matches(&s, None, None, "store checkout"));
+        assert!(session_matches(&s, None, None, "  "));
+    }
+
+    #[test]
+    fn search_filters_rows_and_esc_restores_them() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new(true);
+        app.on_snapshot(crate::fake::snapshot(crate::fake::STEPS - 1));
+        let all = app.item_count();
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        for c in "api-server".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let n = app.item_count();
+        assert!(n >= 1 && n < all);
+        assert!(app.selected_session().unwrap().cwd.contains("api-server"));
+        // Enter keeps the filter; keys act on rows again ('j' doesn't type).
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.search, "api-server");
+        // A new snapshot stays filtered.
+        app.on_snapshot(crate::fake::snapshot(crate::fake::STEPS - 1));
+        assert_eq!(app.item_count(), n);
+        let shown = screen(&render_frame(&mut app, 160, 30));
+        assert!(shown.contains("/api-server") && shown.contains("match"));
+        assert!(!shown.contains("storefront"));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.item_count(), all);
+    }
 
     #[test]
     fn bulk_threshold_keys_step_one_day() {
