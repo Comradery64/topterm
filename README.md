@@ -23,7 +23,7 @@ and put them to sleep without closing the tab or losing the conversation.
 - **Hibernate one session (`H`)**: preview what it was doing first, then end Claude and keep the tab. A card in the tab shows the folder, last ask, recap and the `claude --resume` line.
 - **Hibernate everything stale (`Z`)**: every session idle 7+ days (adjustable) in one go.
 - **Safe by design**: skips busy sessions, sessions running anything besides MCP or language servers, and sessions with unsent text in the input box. Re-checks everything right before acting.
-- **Search (`/`)**: type to filter rows by folder, tab title, command, session name, or what the session was about (its recap and your last ask). Every word must match.
+- **Search (`/`)**: type to filter rows by folder, tab title, command, or session name, and by **anything said in the conversation**: every prompt you typed and every reply from Claude, across all open sessions (about 0.3s for 300 MB of transcripts). Tool output is skipped, so matches mean you talked about it. The selected row shows the matching line.
 - **Go to tab (`o`)**: bring the selected session's Terminal tab to the front.
 
 **Never lose track of a tab**

@@ -96,6 +96,14 @@ pub struct App {
     search_text: HashMap<String, String>,
     search_job: Option<std::sync::mpsc::Receiver<HashMap<String, String>>>,
     search_loaded: Option<Instant>,
+    /// Full-text hits for `ft_query`: session id -> snippet.
+    ft_hits: HashMap<String, String>,
+    ft_query: String,
+    ft_job: Option<std::sync::mpsc::Receiver<(String, HashMap<String, String>)>>,
+    /// Bumped per full-text search; a running scan stops when it changes.
+    ft_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// When to start the next full-text search (debounced typing).
+    ft_due: Option<Instant>,
 }
 
 /// Table column the rows are sorted by.
@@ -260,6 +268,11 @@ impl Default for App {
             search_text: HashMap::new(),
             search_job: None,
             search_loaded: None,
+            ft_hits: HashMap::new(),
+            ft_query: String::new(),
+            ft_job: None,
+            ft_gen: Default::default(),
+            ft_due: None,
             should_quit: false,
             theme: Theme::default(),
             status: None,
@@ -324,9 +337,12 @@ impl App {
             let mut snap = raw.clone();
             if !self.search.trim().is_empty() {
                 let (q, text) = (&self.search, &self.search_text);
+                let ft = if self.ft_query == *q { Some(&self.ft_hits) } else { None };
                 let keep = |x: &Session| {
-                    let extra = x.claude.as_ref().and_then(|c| text.get(&c.session_id));
+                    let id = x.claude.as_ref().map(|c| &c.session_id);
+                    let extra = id.and_then(|i| text.get(i));
                     session_matches(x, raw.tab_titles.get(&x.tty), extra, q)
+                        || id.zip(ft).is_some_and(|(i, h)| h.contains_key(i))
                 };
                 snap.sessions.retain(|x| keep(x));
                 snap.detached.retain(|x| keep(x));
@@ -369,7 +385,76 @@ impl App {
         });
     }
 
+    /// The query changed: schedule a full-text search once typing pauses.
+    fn search_changed(&mut self) {
+        self.ft_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ft_job = None;
+        self.ft_due = (self.search.trim().len() >= 3).then(|| Instant::now() + Duration::from_millis(350));
+        self.apply_sort();
+        self.jump_to_top();
+    }
+
+    /// Scan every open Claude session's chat for the query, in the background.
+    fn start_full_text(&mut self) {
+        self.ft_due = None;
+        let query = self.search.clone();
+        let ids: Vec<String> = self
+            .raw
+            .iter()
+            .flat_map(|s| s.sessions.iter())
+            .filter_map(|x| x.claude.as_ref().map(|c| c.session_id.clone()))
+            .collect();
+        let gen = self.ft_gen.clone();
+        let mine = gen.load(std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.ft_job = Some(rx);
+        std::thread::spawn(move || {
+            let cancelled = || gen.load(std::sync::atomic::Ordering::Relaxed) != mine;
+            let words = crate::search::words(&query);
+            let variants = crate::claude::variants(&crate::claude::home());
+            let mut hits = HashMap::new();
+            for (id, (_, path)) in crate::claude::find_transcripts(&variants, &ids) {
+                if cancelled() {
+                    return;
+                }
+                if let Some(snip) = crate::search::search_transcript(&path, &words, &cancelled) {
+                    hits.insert(id, snip);
+                }
+            }
+            let _ = tx.send((query, hits));
+        });
+    }
+
+    fn poll_full_text(&mut self) {
+        if self.ft_due.is_some_and(|t| Instant::now() >= t) {
+            self.start_full_text();
+        }
+        let Some(rx) = &self.ft_job else { return };
+        match rx.try_recv() {
+            Ok((q, hits)) => {
+                self.ft_job = None;
+                if q == self.search {
+                    self.ft_query = q;
+                    self.ft_hits = hits;
+                    self.apply_sort();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.ft_job = None,
+            Err(_) => {}
+        }
+    }
+
+    /// Snippet of the selected session's chat that matched the search.
+    fn selected_snippet(&self) -> Option<&String> {
+        if self.ft_query != self.search {
+            return None;
+        }
+        let id = &self.selected_session()?.claude.as_ref()?.session_id;
+        self.ft_hits.get(id)
+    }
+
     fn poll_search(&mut self) {
+        self.poll_full_text();
         let Some(rx) = &self.search_job else { return };
         match rx.try_recv() {
             Ok(m) => {
@@ -390,20 +475,18 @@ impl App {
             KeyCode::Esc => {
                 self.search.clear();
                 self.search_typing = false;
-                self.apply_sort();
+                self.search_changed();
             }
             KeyCode::Enter => self.search_typing = false,
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Backspace => {
                 self.search.pop();
-                self.apply_sort();
-                self.jump_to_top();
+                self.search_changed();
             }
             KeyCode::Char(c) => {
                 self.search.push(c);
-                self.apply_sort();
-                self.jump_to_top();
+                self.search_changed();
             }
             _ => {}
         }
@@ -538,6 +621,8 @@ impl App {
         if self.hibernate.as_ref().is_some_and(|h| h.job.is_some())
             || self.bulk.as_ref().is_some_and(|b| b.job.is_some())
             || self.search_job.is_some()
+            || self.ft_job.is_some()
+            || self.ft_due.is_some()
         {
             return true;
         }
@@ -609,7 +694,7 @@ impl App {
             KeyCode::Esc => {
                 if !self.detail_open && !self.search.is_empty() {
                     self.search.clear();
-                    self.apply_sort();
+                    self.search_changed();
                 } else {
                     self.set_detail(false);
                 }
@@ -1566,8 +1651,15 @@ impl App {
         if self.search_typing || !self.search.is_empty() {
             let cursor = if self.search_typing { "\u{258f}" } else { "" };
             spans.push(Span::styled(format!("/{}{cursor} ", self.search), th.modifier(th.fg(MINT), Modifier::BOLD)));
-            let loading = if self.search_job.is_some() { " \u{b7} loading recaps\u{2026}" } else { "" };
+            let loading = if self.ft_job.is_some() || self.ft_due.is_some() || self.search_job.is_some() {
+                " \u{b7} searching chats\u{2026}"
+            } else {
+                ""
+            };
             spans.push(Span::styled(format!("{} match{}{loading} ", self.item_count(), if self.item_count() == 1 { "" } else { "es" }), th.dim()));
+            if let Some(snip) = self.selected_snippet() {
+                spans.push(Span::styled(format!("\u{201c}{snip}\u{201d} "), th.fg(AMBER)));
+            }
             if self.search_typing {
                 spans.extend(chip("\u{21b5}", "done"));
                 spans.extend(chip("esc", "clear"));

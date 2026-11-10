@@ -9,6 +9,7 @@ mod fake;
 mod hibernate;
 mod claude;
 mod index;
+mod search;
 mod theme;
 
 use std::io::{self, Write};

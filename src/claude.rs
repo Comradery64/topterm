@@ -102,17 +102,29 @@ pub fn last_exchange(raw: &str) -> (Option<String>, Option<String>) {
         if user.is_some() && reply.is_some() {
             break;
         }
-        if reply.is_none() && line.contains("\"type\":\"assistant\"") {
-            reply = json_str(line, "text").filter(|t| !t.trim().is_empty());
-        } else if user.is_none() && line.contains("\"type\":\"user\"") && !line.contains("\"tool_use_id\"") {
-            // A typed prompt is stored either as a plain string or as a
-            // text block; tool results (also "user") are skipped above.
-            user = json_str(line, "content")
-                .or_else(|| json_str(line, "text"))
-                .filter(|t| !t.trim().is_empty() && !is_injected(t));
+        match chat_text(line) {
+            Some((true, t)) if user.is_none() => user = Some(t),
+            Some((false, t)) if reply.is_none() => reply = Some(t),
+            _ => {}
         }
     }
     (user, reply)
+}
+
+/// The readable text of one transcript line: (true, prompt) for something
+/// the user typed, (false, reply) for Claude's text. None for tool calls,
+/// tool results, and injected messages. Pure.
+pub fn chat_text(line: &str) -> Option<(bool, String)> {
+    let found = if line.contains("\"type\":\"assistant\"") {
+        json_str(line, "text").map(|t| (false, t))
+    } else if line.contains("\"type\":\"user\"") && !line.contains("\"tool_use_id\"") {
+        // A typed prompt is stored either as a plain string or as a text
+        // block; tool results (also "user") are skipped above.
+        json_str(line, "content").or_else(|| json_str(line, "text")).filter(|t| !is_injected(t)).map(|t| (true, t))
+    } else {
+        None
+    };
+    found.filter(|(_, t)| !t.trim().is_empty())
 }
 
 /// Claude Code's own recap: the newest `away_summary` record in a transcript
