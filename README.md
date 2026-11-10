@@ -36,9 +36,8 @@ terminal tab, whatever is running in it.
 - **Real memory, not RSS.** Uses macOS's `phys_footprint`, so swapped-out memory still counts.
 - **Leak detection**: a pulsing `GROWING` flag on tabs that gained 50 MB+ recently, plus a memory trend per tab.
 - **Duplicate MCP servers**: each agent session starts its own copy; topterm totals them and flags orphans.
-- **Virtual machines**: Docker Desktop, OrbStack, UTM, Colima, Parallels and other VMs get their own row,
-  since their memory belongs to no tab.
-- **Swap and SSD wear** in the header: swap used, and how much is written to the internal SSD per day.
+- **Swap, VMs and SSD wear** in the header: swap used, memory held by a Docker Desktop, OrbStack, UTM or
+  other VM (it belongs to no tab), and how much is written to the internal SSD per day.
 - **Search (`/`)** by folder, tab title, or command. **Go to tab (`o`)** brings it to the front.
 - **Sort by any column**, by key or by clicking the header. **Kill (`K`)** a tab's processes after a confirmation.
 
@@ -95,7 +94,7 @@ And the one-shot plain table:
 ```
 topterm  11 terminal sessions, 702 processes  |  memory 18.54 GB of 16.00 GB physical
 memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM
-swap 9.18 GB of 10.00 GB  ·  internal SSD 8.9 TB written in 21d 4h (~429.92 GB/day)
+swap 9.18 GB of 10.00 GB  ·  Docker Desktop VM 3.32 GB  ·  internal SSD 8.9 TB written in 21d 4h (~429.92 GB/day)
 
 TTY               MEM      ΔMEM   %CPU PROCS AGENT        TAB                 SHELL/RECENT       CWD
 ttys004       6.21 GB   +227 MB  188.4     4              ml-training run 42  zsh / python trai… /Users/demo/dev/vi…   ← GROWING
@@ -112,9 +111,6 @@ ttys019         93 MB     +0 MB    0.2     2              -                   zs
 
 terminal emulator apps (scrollback buffers)
 Terminal                1.15 GB    1.9  pid 812  (app itself, not a tab)
-
-virtual machines (guest memory, not owned by any tab)
-Docker Desktop VM               3.32 GB    4.2  pid 30944
 
 MCP servers (every agent session starts its own copy)
 SERVER                        TABS  PROCS        MEM  ORPHANED

@@ -1176,8 +1176,6 @@ impl App {
             .map(|s| s.emulators.len().min(6))
             .unwrap_or(0);
         let emu_h = if emu_count > 0 { emu_count as u16 + 1 } else { 0 };
-        let vm_count = self.snapshot.as_ref().map(|s| s.vms.len().min(3)).unwrap_or(0);
-        let vm_h = if vm_count > 0 { vm_count as u16 + 1 } else { 0 };
         let detail_h = self.detail_h.round().max(0.0) as u16;
 
         let chunks = Layout::vertical([
@@ -1185,7 +1183,6 @@ impl App {
             Constraint::Min(5),           // table
             Constraint::Length(detail_h), // detail
             Constraint::Length(emu_h),    // emulators
-            Constraint::Length(vm_h),     // virtual machines
             Constraint::Length(1),        // footer
         ])
         .split(area);
@@ -1195,15 +1192,10 @@ impl App {
         if detail_h >= 4 {
             self.draw_detail(frame, chunks[2]);
         }
-        if let Some(snap) = &self.snapshot {
-            let mut emus: Vec<(String, &ProcInfo)> =
-                snap.emulators.iter().map(|p| (short_cmd(&p.command, 20), p)).collect();
-            emus.sort_by_key(|e| std::cmp::Reverse(e.1.mem_kb));
-            self.draw_proc_rows(frame, chunks[3], "emulators", &emus);
-            let vms: Vec<(String, &ProcInfo)> = snap.vms.iter().map(|v| (v.label.clone(), &v.proc)).collect();
-            self.draw_proc_rows(frame, chunks[4], "virtual machines", &vms);
+        if emu_h > 0 {
+            self.draw_emulators(frame, chunks[3]);
         }
-        self.draw_footer(frame, chunks[5]);
+        self.draw_footer(frame, chunks[4]);
         if self.confirm_kill {
             self.draw_kill_overlay(frame, area);
         }
@@ -1816,18 +1808,20 @@ impl App {
 
     // ---------------------------------------------------------- emulators
 
-    /// A ruled section of named processes (emulators, VMs), biggest bar first.
-    fn draw_proc_rows(&self, frame: &mut Frame, area: Rect, title: &str, rows: &[(String, &ProcInfo)]) {
-        if area.height == 0 || rows.is_empty() {
-            return;
-        }
+    fn draw_emulators(&self, frame: &mut Frame, area: Rect) {
+        let snap = match &self.snapshot {
+            Some(s) => s,
+            None => return,
+        };
         let th = self.theme;
-        let max = rows.iter().map(|(_, p)| p.mem_kb).max().unwrap_or(0);
+        let mut emus: Vec<&ProcInfo> = snap.emulators.iter().collect();
+        emus.sort_by(|a, b| b.mem_kb.cmp(&a.mem_kb));
+        let max = emus.first().map(|p| p.mem_kb).unwrap_or(0);
         let mut lines: Vec<Line> = Vec::new();
-        for (label, p) in rows.iter().take(area.height as usize - 1) {
+        for p in emus.iter().take(6) {
             let frac = if max == 0 { 0.0 } else { p.mem_kb as f64 / max as f64 };
             let mut spans = vec![
-                Span::styled(format!("  {:<20}", truncate_chars(label, 20)), th.fg(TEXT)),
+                Span::styled(format!("  {:<20}", short_cmd(&p.command, 20)), th.fg(TEXT)),
                 Span::styled(format!("{:>10} ", human_kb(p.mem_kb)), th.fg(ramp(frac))),
             ];
             spans.extend(self.mini_bar(frac, ROW_BAR_W));
@@ -1836,7 +1830,7 @@ impl App {
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(lines), Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area });
-        draw_rule(frame.buffer_mut(), area.x, area.y, area.width, title, th);
+        draw_rule(frame.buffer_mut(), area.x, area.y, area.width, "emulators", th);
     }
 
     // ------------------------------------------------------------- footer
@@ -2496,23 +2490,6 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
         }
     }
 
-    if !snap.vms.is_empty() {
-        lines.push(String::new());
-        lines.push(format!("{}virtual machines (guest memory, not owned by any tab){}", b, r));
-        for v in &snap.vms {
-            let c = color_for(v.proc.mem_kb);
-            lines.push(format!(
-                "{}{:<28} {:>10} {:>6.1}  pid {}{}",
-                c,
-                clip(&v.label, 28, false),
-                human_kb(v.proc.mem_kb),
-                v.proc.cpu_pct,
-                v.proc.pid,
-                if c.is_empty() { "" } else { r },
-            ));
-        }
-    }
-
     if !snap.mcp.is_empty() {
         lines.push(String::new());
         lines.push(format!("{}MCP servers (every agent session starts its own copy){}", b, r));
@@ -2597,7 +2574,7 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
     lines.join("\n")
 }
 
-/// "swap 27.0 GB of 28.0 GB · SSD 23.8 TB written in 44d (~540 GB/day)".
+/// "swap 27.0 GB of 28.0 GB · Docker Desktop VM 3.3 GB · SSD 23.8 TB written in 44d (~540 GB/day)".
 pub fn system_line(snap: &Snapshot) -> Option<String> {
     let sys = &snap.system;
     let mut parts = Vec::new();
@@ -2607,6 +2584,9 @@ pub fn system_line(snap: &Snapshot) -> Option<String> {
             human_kb(sys.swap_used_bytes / 1024),
             human_kb(sys.swap_total_bytes / 1024)
         ));
+    }
+    for vm in &snap.vms {
+        parts.push(format!("{} {}", vm.label, human_kb(vm.proc.mem_kb)));
     }
     if let (Some(w), Some(per_day)) = (sys.ssd_written_bytes, sys.ssd_bytes_per_day()) {
         parts.push(format!(
