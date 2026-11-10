@@ -186,7 +186,13 @@ def build(rows, title):
             if not text.strip(" ⠀"):
                 continue
             fg, bold, dim = style
-            attrs = f'x="{ox + start * CELL_W:.2f}"'
+            # Pin the run to its cells: glyphs from fallback fonts (✳ ▼ “)
+            # have their own advance widths and would push the rest of the
+            # run, and the box borders after it, off the grid.
+            attrs = (
+                f'x="{ox + start * CELL_W:.2f}" textLength="{len(chars) * CELL_W:.2f}" '
+                f'lengthAdjust="spacingAndGlyphs"'
+            )
             if bold:
                 attrs += ' font-weight="700"'
             if dim:

@@ -267,6 +267,34 @@ pub fn snapshot(step: usize) -> Snapshot {
     let stale = claude_tab("ttys026", "/Users/demo/dev/vision-lab", 690 * MB, 63040, 0.1, "idle", 9 * 24 * H + 5 * H, "dataset-cleanup");
     let staler = claude_tab("ttys031", "/Users/demo/dev/edgecast", 640 * MB, 64050, 0.1, "idle", 16 * 24 * H + 2 * H, "cdn-headers");
 
+    // Other agents: grouped, measured, and searchable the same way, MCP
+    // servers included (the weather server is duplicated across agents).
+    let agent_tab = |tty: &str, cwd: &str, pid: i32, cpu: f64, cmd: &str, agent: &[(u64, &'static str)]| {
+        let mut procs = vec![Proc { pid: pid - 4, ppid: pid - 8, depth: 0, mem_kb: 36 * MB, cpu_pct: 0.0, etime: "05:12:40", command: "-zsh" }];
+        for (i, &(mem, c)) in agent.iter().enumerate() {
+            let i = i as i32;
+            procs.push(Proc { pid: pid + i, ppid: if i == 0 { pid - 4 } else { pid }, depth: if i == 0 { 1 } else { 2 }, mem_kb: mem * MB, cpu_pct: if i == 0 { cpu } else { 0.0 }, etime: "05:12:31", command: c });
+        }
+        let total: u64 = 36 + agent.iter().map(|a| a.0).sum::<u64>();
+        session(tty, "zsh", Some(cmd), cwd, total * MB, step, Curve::Flat(0.9), cpu, &procs)
+    };
+    let codex = agent_tab(
+        "ttys014",
+        "/Users/demo/dev/mobile-app",
+        71020,
+        18.6,
+        "codex",
+        &[(700, "codex"), (96, "npm exec @acme/weather-mcp"), (74, "node /Users/demo/.npm/_npx/1a2b/node_modules/.bin/weather-mcp")],
+    );
+    let gemini = agent_tab(
+        "ttys016",
+        "/Users/demo/dev/docs-site",
+        72030,
+        0.3,
+        "gemini",
+        &[(352, "node /opt/homebrew/bin/gemini"), (96, "npm exec @acme/weather-mcp"), (74, "node /Users/demo/.npm/_npx/1a2b/node_modules/.bin/weather-mcp")],
+    );
+
     let emulator = ProcInfo {
         pid: 812,
         ppid: 1,
@@ -278,7 +306,7 @@ pub fn snapshot(step: usize) -> Snapshot {
         command: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal".to_string(),
     };
 
-    let sessions = vec![leak, api, busy, docker, recent, stale, staler, vite, idle];
+    let sessions = vec![leak, api, busy, codex, docker, recent, stale, staler, gemini, vite, idle];
     let detached = vec![orphan];
     let all: Vec<ProcInfo> = sessions.iter().chain(&detached).flat_map(|s| s.procs.clone()).collect();
     let mcp = crate::collector::mcp_groups(&sessions, &all);
@@ -296,6 +324,8 @@ pub fn snapshot(step: usize) -> Snapshot {
             ("ttys001".to_string(), "api-server (dev)".to_string()),
             ("ttys007".to_string(), "docker compose up".to_string()),
             ("ttys012".to_string(), "vite dev server".to_string()),
+            ("ttys014".to_string(), "codex: fix flaky login test".to_string()),
+            ("ttys016".to_string(), "gemini: docs migration".to_string()),
             ("ttys021".to_string(), "\u{2733} Refactor auth middleware".to_string()),
             ("ttys023".to_string(), "\u{2733} Checkout copy tweaks".to_string()),
             ("ttys026".to_string(), "\u{2733} Dataset dedupe script".to_string()),

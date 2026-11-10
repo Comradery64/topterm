@@ -1,65 +1,57 @@
 # topterm
 
 **Activity Monitor for your terminal tabs, built for people running a lot of AI coding agents.**
-Find which tab is eating your memory, see which Claude Code sessions have been idle for days,
-and put them to sleep without closing the tab or losing the conversation.
+Claude Code, Codex, Gemini CLI, Aider, a dev server, a training run: see what every tab is
+running, what it costs in memory, and which ones you forgot about. Free the memory without
+closing the tab.
 
 ![macOS](https://img.shields.io/badge/platform-macOS-black)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 ![deps](https://img.shields.io/badge/dependencies-3-green)
 
-<img src="assets/search.svg" alt="topterm search: typing /phash narrows the list to the two sessions whose conversations mention it, and p previews the conversation around the match" width="100%">
-
-<sub>Search every open Claude session by what was said in it, then preview that part of the conversation. Rendered from synthetic data.</sub>
+<img src="assets/demo.svg" alt="topterm TUI: one row per terminal tab with memory, an AGENT column showing Claude Code idle times plus Codex and Gemini CLI, and a leaking training run flagged GROWING" width="100%">
 
 ## What makes it different
 
-Other agent monitors track tokens and cost per session. topterm is built for a different problem:
-you have dozens of terminal tabs, each with an agent in it, and you've lost track of them.
+Most agent monitors track tokens and cost per session. topterm watches the machine: every
+terminal tab, whatever is running in it.
 
-- **Find a session by what you talked about.** `/` searches the full conversation of every open
-  Claude session (your prompts and Claude's replies, not tool output) in about 0.3s, and `p`
-  shows the conversation around the match. No more opening tabs one by one to find "the one
-  where we fixed the shadow".
-- **Free memory without losing anything.** Hibernate ends an idle Claude session but keeps its tab,
-  its history, and a card saying what it was doing and how to resume it. `Z` does it for every
-  session idle a week or more.
-- **Memory grouped by tab.** Every process in a tab (agent, MCP servers, dev server, build) adds up
-  to one row, measured as real footprint, so you can see which tab is costing you swap.
-- **It never closes a tab.** Everything is read-only except actions you confirm, and every action
-  re-checks the session right before it runs.
+- **Any agent, any process, one row per tab.** An agent's whole process tree (the CLI, its MCP
+  servers, the dev server it started) adds up to one row, measured as real memory footprint.
+  Works the same for Claude Code, Codex, Gemini CLI, Aider, opencode, or a plain `npm run dev`.
+- **Finds what you forgot.** Leaks get a pulsing `GROWING` flag, duplicate MCP servers across
+  agents are totalled, orphaned processes are listed with no tab to blame, and swap and SSD wear
+  show in the header.
+- **Search everything.** `/` filters by folder, tab title, and any command running in a tab. For
+  Claude Code it also searches the full conversation and previews the match.
+- **Frees memory without losing anything.** For Claude Code, hibernate ends an idle session but
+  keeps the tab, its history, and a card with the resume command. topterm itself never closes a
+  tab or clears scrollback.
 
 ## Features
 
-**Find and navigate**
-- **Full-text search (`/`)**: matches folder, tab title, commands, session name, and anything said
-  in the conversation. Every word must match. The selected row shows the matching line.
-- **Preview a match (`p`)**: the messages around the match, with your search words highlighted.
-  `n`/`N` step through older and newer mentions.
-- **Go to tab (`o`)**: bring the selected session's Terminal tab to the front.
-- **Sort by any column**, by key or by clicking the header. Mouse support throughout.
-
-**Manage Claude Code sessions**
-- **CLAUDE column**: busy or idle, and for how long (`idle 9d 4h`). Sort to find forgotten sessions.
-- **Hibernate one session (`H`)**: preview what it was doing first, then end Claude and keep the
-  tab. A card in the tab shows the folder, last ask, recap and the `claude --resume` line.
-- **Hibernate everything stale (`Z`)**: every session idle 7+ days (adjustable) in one go.
-- **Safe by design**: skips busy sessions, sessions running anything besides MCP or language
-  servers, and sessions with unsent text in the input box.
-
-**See where memory goes**
-- **One row per terminal tab**, with everything running in it grouped: agents, dev servers, builds, ssh.
+**Works with any agent or process**
+- **One row per terminal tab**, with everything running in it grouped: agents, MCP servers, dev servers, builds, ssh.
+- **AGENT column**: names the agent in each tab (`codex`, `gemini`, `aider`, `opencode`, `goose`, `amp`, …).
 - **Real memory, not RSS.** Uses macOS's `phys_footprint`, so swapped-out memory still counts.
-- **Swap and SSD wear** in the header: swap used, and how much has been written to the internal SSD per day since boot.
-- **Scrollback per tab** (`--scrollback`): which tab's history is bloating Terminal.app.
-- **Duplicate MCP servers**: the same server running once per Claude session, with the total memory.
-- **Leak detection**: a pulsing `GROWING` flag on sessions that gained 50 MB+ recently, plus a memory trend per session.
+- **Leak detection**: a pulsing `GROWING` flag on tabs that gained 50 MB+ recently, plus a memory trend per tab.
+- **Duplicate MCP servers**: each agent session starts its own copy; topterm totals them and flags orphans.
+- **Swap and SSD wear** in the header: swap used, and how much is written to the internal SSD per day.
+- **Search (`/`)** by folder, tab title, or command. **Go to tab (`o`)** brings it to the front.
+- **Sort by any column**, by key or by clicking the header. **Kill (`K`)** a tab's processes after a confirmation.
 
-**Never lose track of a tab**
-- **Tab index**: a markdown map of every tab's folder, Claude session, resume command and recap.
-  It refreshes itself every 20 minutes while the TUI is open.
-- **Uses Claude's own recap** when the session has one; otherwise topterm writes a short summary
-  with Haiku on low effort, which never touches the conversation.
+**Deeper with Claude Code** (it keeps its state on disk, so topterm can read it)
+- **Idle time** in the AGENT column (`idle 9d 4h`), so forgotten sessions sort to the top.
+- **Full-text search**: `/` also matches anything said in the conversation, your prompts and
+  Claude's replies, not tool output. **`p`** previews the messages around the match.
+- **Hibernate (`H`)**: end an idle session, keep the tab. A card in the tab shows the folder,
+  last ask, recap, and the `claude --resume` line. **`Z`** does it for every session idle 7+ days.
+- **Tab index**: a markdown map of every tab's folder, session, resume command, and recap,
+  refreshed every 20 minutes while the TUI is open.
+
+**Terminals**
+- Memory and grouping work in any terminal. Tab titles come from Terminal.app and iTerm2;
+  scrollback size, go-to-tab, and hibernate use Terminal.app.
 
 **Built for the terminal**
 - **One-shot table** for scripts and pipes, or the live TUI with `-t`.
@@ -70,7 +62,7 @@ you have dozens of terminal tabs, each with an agent in it, and you've lost trac
 | You want to… | Do this |
 |---|---|
 | See which tab is using the most memory | `topterm -t`. Rows are tabs, biggest first. |
-| Find Claude sessions you forgot about | Click the **CLAUDE** header (or press `s` until it's sorted). Longest idle first. |
+| Find Claude sessions you forgot about | Click the **AGENT** header (or press `s` until it's sorted). Longest idle first. |
 | Free one idle session's memory, keep the tab | Select it, press `H`, check the preview, press `y`. |
 | Free every session idle a week or more | Press `Z`, check the list (`+`/`-` change the days), press `y`. |
 | Find the tab that was working on X | Press `/`, type a word or two, `Enter`. `p` shows that part of the conversation, `o` jumps to the tab. |
@@ -83,10 +75,10 @@ you have dozens of terminal tabs, each with an agent in it, and you've lost trac
 Everything is read-only except the actions you confirm (`H`, `Z`, `K`). topterm never closes
 a tab or clears its scrollback.
 
-<img src="assets/demo.svg" alt="topterm TUI: sessions grouped by terminal tab, with a CLAUDE column showing idle time" width="100%">
-<sub>The main view: one row per tab, memory, and how long each Claude session has been idle</sub>
-
 <table>
+<tr>
+<td colspan="2"><img src="assets/search.svg" alt="topterm search: /phash narrows the list to the two Claude sessions whose conversations mention it, and p previews the conversation around the match"><br><sub><b>/</b> and <b>p</b>: find a Claude session by what was said in it, then preview that part of the conversation</sub></td>
+</tr>
 <tr>
 <td width="50%"><img src="assets/hibernate.svg" alt="H: hibernate preview with last ask, Claude's recap, and the tab's screen"><br><sub><b>H</b>: preview before hibernating one session</sub></td>
 <td width="50%"><img src="assets/sleep-stale.svg" alt="Z: list of Claude sessions idle 7+ days"><br><sub><b>Z</b>: hibernate everything idle 7+ days</sub></td>
@@ -99,27 +91,29 @@ a tab or clears its scrollback.
 And the one-shot plain table:
 
 ```
-topterm  9 terminal sessions, 702 processes  |  memory 18.54 GB of 16.00 GB physical
+topterm  11 terminal sessions, 702 processes  |  memory 18.54 GB of 16.00 GB physical
 memory = physical footprint (incl. compressed + swapped), so the sum can exceed RAM
 swap 9.18 GB of 10.00 GB  ·  internal SSD 8.9 TB written in 21d 4h (~429.92 GB/day)
 
-TTY               MEM      ΔMEM   %CPU PROCS CLAUDE       TAB                 SHELL/RECENT       CWD
-ttys004       6.21 GB   +227 MB  188.4     4              ml-training run 42  zsh / python trai… /Users/demo/dev/visi…   ← GROWING
-ttys001       1.38 GB     -3 MB   24.7     4              api-server (dev)    zsh / node server… /Users/demo/dev/api-…
-ttys021       1.15 GB     -2 MB   42.3     5 busy         ✳ Refactor auth mi… zsh / claude       /Users/demo/dev/api-…
-ttys007        817 MB     -0 MB    9.3     3              docker compose up   zsh / docker comp… /Users/demo/dev/edge…
-ttys023        777 MB     -1 MB    0.4     5 idle 2h 14m  ✳ Checkout copy tw… zsh / claude       /Users/demo/dev/stor…
-ttys026        688 MB     -1 MB    0.1     5 idle 9d 5h   ✳ Dataset dedupe s… zsh / claude       /Users/demo/dev/visi…
-ttys031        638 MB     -1 MB    0.1     5 idle 16d 2h  ✳ CDN cache headers zsh / claude       /Users/demo/dev/edge…
-ttys012        514 MB     +1 MB    5.1     2              vite dev server     zsh / vite dev se… /Users/demo/dev/stor…
+TTY               MEM      ΔMEM   %CPU PROCS AGENT        TAB                 SHELL/RECENT       CWD
+ttys004       6.21 GB   +227 MB  188.4     4              ml-training run 42  zsh / python trai… /Users/demo/dev/vi…   ← GROWING
+ttys001       1.38 GB     -3 MB   24.7     4              api-server (dev)    zsh / node server… /Users/demo/dev/ap…
+ttys021       1.15 GB     -2 MB   42.3     5 busy         ✳ Refactor auth mi… zsh / claude       /Users/demo/dev/ap…
+ttys014        902 MB     -1 MB   18.6     4 codex        codex: fix flaky l… zsh / codex        /Users/demo/dev/mo…
+ttys007        817 MB     -0 MB    9.3     3              docker compose up   zsh / docker comp… /Users/demo/dev/ed…
+ttys023        777 MB     -1 MB    0.4     5 idle 2h 14m  ✳ Checkout copy tw… zsh / claude       /Users/demo/dev/st…
+ttys026        688 MB     -1 MB    0.1     5 idle 9d 5h   ✳ Dataset dedupe s… zsh / claude       /Users/demo/dev/vi…
+ttys031        638 MB     -1 MB    0.1     5 idle 16d 2h  ✳ CDN cache headers zsh / claude       /Users/demo/dev/ed…
+ttys016        555 MB     -1 MB    0.3     4 gemini       gemini: docs migra… zsh / gemini       /Users/demo/dev/do…
+ttys012        514 MB     +1 MB    5.1     2              vite dev server     zsh / vite dev se… /Users/demo/dev/st…
 ttys019         93 MB     +0 MB    0.2     2              -                   zsh                /Users/demo
 
 terminal emulator apps (scrollback buffers)
 Terminal                1.15 GB    1.9  pid 812  (app itself, not a tab)
 
-MCP servers (every Claude session starts its own copy)
+MCP servers (every agent session starts its own copy)
 SERVER                        TABS  PROCS        MEM  ORPHANED
-weather-mcp                      4      8     678 MB  -
+weather-mcp                      6     12    1016 MB  -
 notes-tool mcp                   4      4     207 MB  -
 
 detached (reparented to launchd - no tab to blame, kill by pid)
@@ -184,12 +178,13 @@ topterm --summarize > tabs.md    # same, plus a short recap per session
 
 ### Memory details
 
-- **CLAUDE column**: `idle 4d 16h` / `busy` for the Claude Code session in each tab, read from
-  `~/.claude/sessions/<pid>.json` (and cc-mirror variants).
+- **AGENT column**: `idle 4d 16h` / `busy` for the Claude Code session in each tab, read from
+  `~/.claude/sessions/<pid>.json` (and cc-mirror variants). Other agents (`codex`, `gemini`,
+  `aider`, …) are named by their executable; they don't publish an idle state topterm can read.
 - **Swap and SSD writes** in the header: swap used, and bytes written to the internal SSD since
   boot with a per-day average, from the disk's own counter (`ioreg`). Sustained swapping shows up
   here as hundreds of GB a day.
-- **MCP servers**: every Claude session starts its own copy of each MCP server. The one-shot table
+- **MCP servers**: every agent session starts its own copy of each MCP server. The one-shot table
   lists each server with how many tabs run it, its processes, total memory, and any copies
   orphaned to `launchd` after their session ended.
 - **`--scrollback`**: each tab's Terminal.app scrollback in characters, with an estimate of its

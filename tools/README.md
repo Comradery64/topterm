@@ -4,8 +4,8 @@ Regenerating `assets/demo.svg` after a visual change:
 
 ```sh
 cargo build --release
-python3 tools/capture_frame.py 140 36 /tmp/frame.ans ./target/release/topterm --fake-data --demo-frame
-python3 tools/ansi2svg.py /tmp/frame.ans assets/demo.svg "topterm — ttys004 leaking"
+python3 tools/capture_frame.py 140 38 /tmp/frame.ans ./target/release/topterm --fake-data --demo-frame
+python3 tools/ansi2svg.py /tmp/frame.ans assets/demo.svg "topterm — every tab, every agent, what it costs"
 ```
 
 The other screenshots (all from `--fake-data`, never from your machine):
@@ -25,7 +25,7 @@ python3 tools/ansi2svg.py /tmp/c.ans assets/card.svg "topterm — the card left 
 And the plain-text block in the top-level README:
 
 ```sh
-COLUMNS=112 ./target/release/topterm --fake-data --no-color
+COLUMNS=116 ./target/release/topterm --fake-data --no-color
 ```
 
 `--fake-data` renders the synthetic machine in `src/fake.rs`, so nothing from

@@ -1554,7 +1554,7 @@ impl App {
                         match &sess.claude {
                             Some(c) if c.is_idle() => th.fg(AMBER),
                             Some(_) => th.fg(MINT),
-                            None => th.dim(),
+                            None => th.fg(TEXT),
                         },
                     )),
                     Line::from(tab),
@@ -1599,7 +1599,7 @@ impl App {
             Constraint::Fill(4),
             Constraint::Length(8),
         ];
-        let names = ["TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "CLAUDE", "TAB", "SHELL/RECENT", "CWD"];
+        let names = ["TTY", "MEM", "\u{394}MEM", "%CPU", "PROCS", "AGENT", "TAB", "SHELL/RECENT", "CWD"];
         let mut labels: Vec<String> = names
             .iter()
             .zip(SORT_COLS)
@@ -2432,7 +2432,7 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
         "\u{394}MEM",
         "%CPU",
         "PROCS",
-        "CLAUDE",
+        "AGENT",
         "TAB",
         "SHELL/RECENT",
         "CWD",
@@ -2492,7 +2492,7 @@ pub fn plain_report(snap: &Snapshot, color: bool, wide: bool) -> String {
 
     if !snap.mcp.is_empty() {
         lines.push(String::new());
-        lines.push(format!("{}MCP servers (every Claude session starts its own copy){}", b, r));
+        lines.push(format!("{}MCP servers (every agent session starts its own copy){}", b, r));
         lines.push(format!("{}{:<28} {:>5} {:>6} {:>10}  ORPHANED{}", d, "SERVER", "TABS", "PROCS", "MEM", r));
         for g in &snap.mcp {
             let orphan = if g.orphaned > 0 {
@@ -2596,7 +2596,8 @@ pub fn system_line(snap: &Snapshot) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("  \u{b7}  "))
 }
 
-/// "idle 6d 2h" / "busy" / "" for a session's Claude instance.
+/// "idle 6d 2h" / "busy" for a Claude session, another agent's name
+/// ("codex"), or "".
 pub fn claude_cell(sess: &Session, now_ms: u64) -> String {
     match &sess.claude {
         Some(c) if c.is_idle() && c.status_since_ms > 0 => {
@@ -2604,8 +2605,28 @@ pub fn claude_cell(sess: &Session, now_ms: u64) -> String {
         }
         Some(c) if c.is_idle() => "idle".to_string(),
         Some(_) => "busy".to_string(),
-        None => String::new(),
+        None => other_agent(sess).unwrap_or_default().to_string(),
     }
+}
+
+/// Coding agents besides Claude Code, by executable name. topterm can't
+/// read their state, so the AGENT column names them without idle time.
+const AGENTS: &[&str] =
+    &["codex", "gemini", "aider", "opencode", "goose", "amp", "cursor-agent", "crush", "qwen", "copilot", "droid", "kiro-cli"];
+
+/// The first non-Claude coding agent running in the tab, matched on the
+/// executable or the script a node/python launcher runs. Pure.
+pub fn other_agent(sess: &Session) -> Option<&'static str> {
+    sess.procs.iter().find_map(|p| {
+        let mut args = p.command.split_whitespace();
+        let first = args.next()?.rsplit('/').next()?;
+        let name = if matches!(first, "node" | "bun" | "python" | "python3") {
+            args.next()?.rsplit('/').next()?
+        } else {
+            first
+        };
+        AGENTS.iter().copied().find(|a| *a == name)
+    })
 }
 
 pub fn now_ms() -> u64 {
@@ -2998,6 +3019,16 @@ mod tests {
         assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys002", "ttys010", "ttys100"]);
     }
 
+
+    #[test]
+    fn agent_column_names_other_agents() {
+        let snap = crate::fake::snapshot(crate::fake::STEPS - 1);
+        let cell = |t: &str| claude_cell(snap.sessions.iter().find(|s| s.tty == t).unwrap(), now_ms());
+        assert_eq!(cell("ttys014"), "codex");
+        assert_eq!(cell("ttys016"), "gemini");
+        assert_eq!(cell("ttys021"), "busy");
+        assert_eq!(cell("ttys012"), "");
+    }
 
     #[test]
     fn highlight_marks_every_occurrence() {
