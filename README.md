@@ -24,6 +24,7 @@ and put them to sleep without closing the tab or losing the conversation.
 - **Hibernate everything stale (`Z`)**: every session idle 7+ days (adjustable) in one go.
 - **Safe by design**: skips busy sessions, sessions running anything besides MCP or language servers, and sessions with unsent text in the input box. Re-checks everything right before acting.
 - **Search (`/`)**: type to filter rows by folder, tab title, command, or session name, and by **anything said in the conversation**: every prompt you typed and every reply from Claude, across all open sessions (about 0.3s for 300 MB of transcripts). Tool output is skipped, so matches mean you talked about it. The selected row shows the matching line.
+- **Preview a match (`p`)**: the conversation around the match, with your search words highlighted. `n`/`N` step through older and newer mentions; `o` jumps to the tab.
 - **Go to tab (`o`)**: bring the selected session's Terminal tab to the front.
 
 **Never lose track of a tab**
@@ -46,7 +47,7 @@ and put them to sleep without closing the tab or losing the conversation.
 | Find Claude sessions you forgot about | Click the **CLAUDE** header (or press `s` until it's sorted). Longest idle first. |
 | Free one idle session's memory, keep the tab | Select it, press `H`, check the preview, press `y`. |
 | Free every session idle a week or more | Press `Z`, check the list (`+`/`-` change the days), press `y`. |
-| Find the tab that was working on X | Press `/`, type a word or two, `Enter`, then `o` to jump there. |
+| Find the tab that was working on X | Press `/`, type a word or two, `Enter`. `p` shows that part of the conversation, `o` jumps to the tab. |
 | Jump to a session's tab | Select it, press `o`. |
 | Bring a hibernated session back | Run the `Wake` line printed in its tab: `claude --resume <id>`. |
 | Close tabs without losing track of them | Nothing to do: with `topterm -t` open, the tab map at `~/Library/Application Support/topterm/index.md` refreshes itself every 20 minutes. |
@@ -239,6 +240,7 @@ Both modes only read. Nothing is closed, cleared, or signalled.
 | `Enter` / click again | expand / collapse detail |
 | `s` / `r` / click a header | sort by that column / reverse (click the same header again to reverse) |
 | `/` | search: filter rows as you type (`Enter` keep, `Esc` clear) |
+| `p` | preview the conversation around the search match (`n`/`N` older/newer, `o` go to tab) |
 | `o` | bring the selected session's Terminal tab to the front |
 | `Z` | hibernate every Claude session idle 7+ days (`+`/`-` adjust, `y` run) |
 | `H` | hibernate preview for the selected Claude session (`R` reveal, `S` summary, `y` hibernate) |

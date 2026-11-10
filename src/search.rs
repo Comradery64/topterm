@@ -61,6 +61,34 @@ pub fn search_transcript(path: &Path, words: &[String], cancelled: &dyn Fn() -> 
     if seen.iter().all(|&s| s) { best.map(|(_, s)| s) } else { None }
 }
 
+/// Every chat message in a transcript, oldest first: (typed by the user,
+/// text). Tool calls, tool output, and injected messages are left out.
+pub fn chat_messages(path: &Path) -> Vec<(bool, String)> {
+    let Ok(f) = File::open(path) else { return Vec::new() };
+    let mut r = BufReader::new(f);
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+        let line = String::from_utf8_lossy(&buf);
+        if crate::claude::is_chat_line(&line) {
+            out.extend(crate::claude::chat_text(&line));
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// Messages containing any of `words`, newest first, and the position in
+/// that list of the best one (most words; newest on ties). Pure.
+pub fn match_list(msgs: &[(bool, String)], words: &[String]) -> (Vec<usize>, usize) {
+    let hits = |t: &str| {
+        let l = t.to_ascii_lowercase();
+        words.iter().filter(|w| l.contains(w.as_str())).count()
+    };
+    let list: Vec<usize> = (0..msgs.len()).rev().filter(|&i| hits(&msgs[i].1) > 0).collect();
+    let best = list.iter().enumerate().max_by_key(|(k, &i)| (hits(&msgs[i].1), std::cmp::Reverse(*k))).map_or(0, |(k, _)| k);
+    (list, best)
+}
+
 /// How many of `words` are in `text`, and a one-line snippet around the
 /// first word found. None if none are. Pure.
 pub fn match_text(text: &str, words: &[String]) -> Option<(usize, String)> {
@@ -101,6 +129,17 @@ mod tests {
         assert!(s.starts_with('\u{2026}') && s.ends_with('\u{2026}'));
         assert!(s.contains("Occlusion fix for Ada is done"));
         assert_eq!(match_text("nothing here", &w("ada")), None);
+    }
+
+    #[test]
+    fn match_list_newest_first_best_by_word_count() {
+        let m = |t: &str| (true, t.to_string());
+        let msgs = vec![m("walk cycle"), m("nothing"), m("walk"), m("the walk"), m("other")];
+        let (list, best) = match_list(&msgs, &w("walk cycle"));
+        assert_eq!(list, vec![3, 2, 0]);
+        assert_eq!(list[best], 0);
+        let (_, best) = match_list(&msgs, &w("walk"));
+        assert_eq!(best, 0);
     }
 
     #[test]

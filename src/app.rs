@@ -104,6 +104,22 @@ pub struct App {
     ft_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// When to start the next full-text search (debounced typing).
     ft_due: Option<Instant>,
+    /// Open search-match preview (`p`), if any.
+    pub preview: Option<PreviewUi>,
+}
+
+/// The conversation around a search match in one session.
+#[derive(Debug)]
+pub struct PreviewUi {
+    pub tty: String,
+    pub title: String,
+    /// Chat messages, oldest first: (typed by the user, text).
+    msgs: Vec<(bool, String)>,
+    /// Indices into `msgs` that match, newest first.
+    matches: Vec<usize>,
+    /// Current position in `matches`.
+    pos: usize,
+    words: Vec<String>,
 }
 
 /// Table column the rows are sorted by.
@@ -169,6 +185,29 @@ pub fn sort_key_cmp(
         SortCol::Recent => label(a).cmp(&label(b)),
         SortCol::Cwd => a.cwd.to_lowercase().cmp(&b.cwd.to_lowercase()),
     })
+}
+
+/// Split `line` into spans, styling every occurrence of any of `words`
+/// (already ASCII-lowercased) with `hi`. Pure.
+pub fn highlight(line: &str, words: &[String], base: Style, hi: Style) -> Vec<Span<'static>> {
+    let lower = line.to_ascii_lowercase();
+    let mut marks = vec![false; line.len()];
+    for w in words.iter().filter(|w| !w.is_empty()) {
+        for (at, _) in lower.match_indices(w.as_str()) {
+            marks[at..at + w.len()].iter_mut().for_each(|m| *m = true);
+        }
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 1..=line.len() {
+        if i == line.len() || (line.is_char_boundary(i) && marks[i] != marks[start]) {
+            if i == line.len() || line.is_char_boundary(i) {
+                out.push(Span::styled(line[start..i].to_string(), if marks[start] { hi } else { base }));
+                start = i;
+            }
+        }
+    }
+    out
 }
 
 /// True if every word of `query` appears (case-insensitive) in the
@@ -273,6 +312,7 @@ impl Default for App {
             ft_job: None,
             ft_gen: Default::default(),
             ft_due: None,
+            preview: None,
             should_quit: false,
             theme: Theme::default(),
             status: None,
@@ -441,6 +481,52 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.ft_job = None,
             Err(_) => {}
+        }
+    }
+
+    /// Show the conversation around the selected session's search match.
+    fn open_preview(&mut self) {
+        let words = crate::search::words(&self.search);
+        let Some(sess) = self.selected_session() else { return };
+        if words.is_empty() {
+            self.status = Some("press / and search first; p previews the match".into());
+            return;
+        }
+        let Some(live) = sess.claude.as_ref() else {
+            self.status = Some("no Claude conversation in this tab to preview".into());
+            return;
+        };
+        let tty = sess.tty.clone();
+        let title = self.snapshot.as_ref().and_then(|s| s.tab_titles.get(&tty)).cloned().unwrap_or_default();
+        let variants = crate::claude::variants(&crate::claude::home());
+        let path = crate::claude::find_transcripts(&variants, std::slice::from_ref(&live.session_id))
+            .remove(&live.session_id)
+            .map(|(_, p)| p);
+        let msgs = path.map(|p| crate::search::chat_messages(&p)).unwrap_or_default();
+        let (matches, pos) = crate::search::match_list(&msgs, &words);
+        if matches.is_empty() {
+            self.status = Some("this session's chat doesn't mention that".into());
+            return;
+        }
+        self.status = None;
+        self.preview = Some(PreviewUi { tty, title, msgs, matches, pos, words });
+    }
+
+    fn handle_preview_key(&mut self, code: KeyCode) {
+        let Some(p) = self.preview.as_mut() else { return };
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => self.preview = None,
+            KeyCode::Char('n') | KeyCode::Down | KeyCode::Char('j') => {
+                p.pos = (p.pos + 1).min(p.matches.len() - 1);
+            }
+            KeyCode::Char('N') | KeyCode::Up | KeyCode::Char('k') => p.pos = p.pos.saturating_sub(1),
+            KeyCode::Char('o') => {
+                let tty = p.tty.clone();
+                self.preview = None;
+                self.status = Some(format!("bringing {tty} to the front\u{2026}"));
+                std::thread::spawn(move || crate::hibernate::reveal(&tty));
+            }
+            _ => {}
         }
     }
 
@@ -672,12 +758,17 @@ impl App {
             }
             return;
         }
+        if self.preview.is_some() {
+            self.handle_preview_key(key.code);
+            return;
+        }
         if self.search_typing {
             self.handle_search_key(key.code);
             return;
         }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('p') => self.open_preview(),
             KeyCode::Char('/') => {
                 self.search_typing = true;
                 self.status = None;
@@ -1082,6 +1173,86 @@ impl App {
         if self.bulk.is_some() {
             self.draw_bulk_overlay(frame, area);
         }
+        if self.preview.is_some() {
+            self.draw_preview_overlay(frame, area);
+        }
+    }
+
+    fn draw_preview_overlay(&self, frame: &mut Frame, area: Rect) {
+        let Some(p) = &self.preview else { return };
+        let th = self.theme;
+        self.draw_scrim(frame, area);
+        let width = area.width.saturating_sub(4).min(110);
+        let height = area.height.saturating_sub(2);
+        let inner = width.saturating_sub(4) as usize;
+        let at = p.matches[p.pos];
+        // Messages around the match; neighbours are capped, the match is not.
+        let mut body: Vec<Line> = Vec::new();
+        let mut focus = 0;
+        for i in at.saturating_sub(3)..(at + 4).min(p.msgs.len()) {
+            let (user, text) = &p.msgs[i];
+            let here = i == at;
+            if here {
+                focus = body.len();
+            }
+            let (who, color) = if *user { ("you", MINT) } else { ("claude", AMBER) };
+            body.push(Line::from(Span::styled(
+                format!("{who}{}", if here { "  \u{25c2} match" } else { "" }),
+                th.modifier(th.fg(color), Modifier::BOLD),
+            )));
+            let wrapped: Vec<String> =
+                text.lines().flat_map(|l| wrap_chars(l, inner.saturating_sub(2))).filter(|l| !l.trim().is_empty()).collect();
+            let cap = if here { usize::MAX } else { 4 };
+            for l in wrapped.iter().take(cap) {
+                let style = if here { th.fg(TEXT) } else { th.dim() };
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(highlight(l, &p.words, style, th.modifier(th.fg(AMBER), Modifier::BOLD | Modifier::UNDERLINED)));
+                body.push(Line::from(spans));
+            }
+            if wrapped.len() > cap {
+                body.push(Line::from(Span::styled(format!("  \u{2026} {} more lines", wrapped.len() - cap), th.dim())));
+            }
+            body.push(Line::from(""));
+        }
+        // Scroll so the first highlighted line of the match sits a third down.
+        let body_h = height.saturating_sub(6) as usize;
+        let hit = body[focus..]
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)))
+            .map_or(focus, |k| focus + k);
+        let start = hit.saturating_sub(body_h / 3).min(focus).min(body.len().saturating_sub(body_h));
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{} ", p.tty), th.modifier(th.fg(MINT), Modifier::BOLD)),
+                Span::styled(truncate_chars(&p.title, inner.saturating_sub(30)), th.fg(TEXT)),
+                Span::styled(format!("  match {} of {}", p.pos + 1, p.matches.len()), th.dim()),
+            ]),
+            Line::from(""),
+        ];
+        lines.extend(body.into_iter().skip(start).take(body_h));
+        let key = |k: &str| Span::styled(format!(" {k} "), th.modifier(th.fg(BASE).bg(th.color(MINT)), Modifier::BOLD));
+        lines.push(Line::from(vec![
+            key("n"),
+            Span::raw(" older   "),
+            key("N"),
+            Span::raw(" newer   "),
+            key("o"),
+            Span::raw(" go to tab   "),
+            key("Esc"),
+            Span::raw(" close"),
+        ]));
+        let popup = centered_rect(area, width, (lines.len() as u16 + 2).min(height));
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_type(if th.plain() { BorderType::Plain } else { BorderType::Rounded })
+                    .border_style(th.fg(MINT))
+                    .title(inset_title(&format!("\u{201c}{}\u{201d} in this conversation", self.search.trim()), th, MINT))
+                    .style(if th.plain() { Style::default() } else { Style::default().bg(th.color(PANEL)) }),
+            ),
+            popup,
+        );
     }
 
     fn draw_bulk_overlay(&self, frame: &mut Frame, area: Rect) {
@@ -1671,6 +1842,9 @@ impl App {
         spans.extend(chip("esc", "collapse"));
         spans.extend(chip("j/k", "move"));
         spans.extend(chip("click", "select"));
+        if !self.search.is_empty() {
+            spans.extend(chip("p", "preview match"));
+        }
         spans.extend(chip("/", "search"));
         spans.extend(chip("s/r", "sort"));
         spans.extend(chip("o", "go to tab"));
@@ -2792,6 +2966,38 @@ mod tests {
         assert_eq!(v.iter().map(|s| s.tty.as_str()).collect::<Vec<_>>(), ["ttys002", "ttys010", "ttys100"]);
     }
 
+
+    #[test]
+    fn highlight_marks_every_occurrence() {
+        let (b, h) = (Style::default(), Style::default().add_modifier(Modifier::BOLD));
+        let spans = highlight("Walk the walk, café", &["walk".into()], b, h);
+        let text: Vec<(&str, bool)> = spans.iter().map(|s| (s.content.as_ref(), s.style == h)).collect();
+        assert_eq!(text, vec![("Walk", true), (" the ", false), ("walk", true), (", café", false)]);
+    }
+
+    #[test]
+    fn preview_overlay_shows_the_match_and_steps() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new(true);
+        app.on_snapshot(crate::fake::snapshot(crate::fake::STEPS - 1));
+        app.search = "shadow".into();
+        let m = |u: bool, t: &str| (u, t.to_string());
+        app.preview = Some(PreviewUi {
+            tty: "ttys021".into(),
+            title: "demo".into(),
+            msgs: vec![m(true, "add a shadow under the player"), m(false, "Done, the shadow is drawn first."), m(true, "commit it")],
+            matches: vec![1, 0],
+            pos: 0,
+            words: vec!["shadow".into()],
+        });
+        let shown = screen(&render_frame(&mut app, 120, 30));
+        assert!(shown.contains("match 1 of 2") && shown.contains("the shadow is drawn first"));
+        assert!(shown.contains("commit it") && shown.contains("older"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(screen(&render_frame(&mut app, 120, 30)).contains("match 2 of 2"));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.preview.is_none());
+    }
 
     #[test]
     fn search_matches_every_word_anywhere() {
